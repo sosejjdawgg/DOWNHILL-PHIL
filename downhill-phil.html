@@ -56,6 +56,18 @@ var TUNING = {
   diveGravityMult: 4,         // multiplier applied to gravity while diving
   diveForwardAccel: 260,      // px/s^2, small forward push while diving
 
+  // Reference implementations (haqu/tiny-wings, ncase/Pony-Wings) apply the
+  // dive force continuously whether the player is grounded or airborne --
+  // holding dive on a downslope actively pumps extra speed, and holding it
+  // on an upslope pushes you forward through the climb. Without this the
+  // only speed source is passive gravity-along-slope, which (being
+  // energy-conserving over a symmetric hill) never really builds momentum.
+  groundPump: {
+    flatEpsilon: 0.02,        // slope below this counts as "climbing", not "descending"
+    descendMult: 3.2,         // extra multiple of gravity pumped in while diving downhill
+    ascendForwardAccel: 2000  // px/s^2 forward push while diving up a slope
+  },
+
   minSpeed: 180,              // px/s, player is never allowed to fully stall
   maxSpeed: 2500,             // px/s, overall speed clamp
   maxFallSpeed: 3000,         // px/s, vertical fall speed clamp
@@ -67,20 +79,21 @@ var TUNING = {
     easeY: 3.5,               // vertical follow ease rate while grounded (soft/floaty)
     easeYAirborne: 9.0,       // snappier vertical ease in the air so the lookahead below
                               // actually catches up before a (typically brief) flight ends
-    zoomMin: 0.42,            // zoomed out at top speed/fall rate
+    zoomMin: 0.32,            // zoomed out at top speed/fall rate/altitude
     zoomMax: 1.0,             // zoomed in at low speed
     zoomSpeedRef: 1500,       // px/s speed at which zoom reaches zoomMin
-    easeZoom: 2.5,
+    zoomAltRef: 500,          // px of altitude above terrain at which zoom reaches zoomMin
+    easeZoom: 5.0,            // fast enough to actually catch the target during a short flight
     vertLookaheadTime: 0.3,   // s, how far ahead of a climb/fall the camera peeks
     vertLookaheadMax: 320     // px, cap on that vertical peek-ahead offset
   },
 
   terrain: {
     baseline: 0,              // world Y of the "flat" reference line
-    minWidth: 140,            // narrowest hill half-span-ish segment width
-    maxWidth: 320,            // widest segment width at max difficulty
-    minAmp: 70,               // smallest hill amplitude
-    maxAmp: 260,              // largest hill amplitude at max difficulty
+    minWidth: 220,            // narrowest hill half-span-ish segment width
+    maxWidth: 460,            // widest segment width at max difficulty
+    minAmp: 60,               // smallest hill amplitude
+    maxAmp: 240,              // largest hill amplitude at max difficulty
     hillsPerIsland: 6,        // every N hills = new island color palette
     sampleStep: 10            // px between rendered terrain samples
   },
@@ -279,11 +292,10 @@ var terrain = {
       var width = lerp(t.minWidth, t.maxWidth, diff) * randRange(0.75, 1.25);
       var amp = lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
 
-      // Alternate up/down almost every hill (real Tiny Wings scalloped chain,
-      // each key point a peak or trough) so sharp crests -- and therefore
-      // launches -- come around regularly; an occasional repeat keeps it
-      // from feeling too mechanical.
-      var dir = Math.random() < 0.85 ? -this.lastDir : this.lastDir;
+      // Strictly alternate up/down every hill -- matching haqu/tiny-wings'
+      // terrain generator (`sign *= -1` each key point) -- so every key
+      // point is a real peak or trough of the scalloped chain.
+      var dir = -this.lastDir;
       this.lastDir = dir;
 
       var newY = clamp(
@@ -337,13 +349,6 @@ var terrain = {
   slope: function (x) {
     var eps = 4;
     return (this.y(x + eps) - this.y(x - eps)) / (2 * eps);
-  },
-
-  // second derivative d2y/dx2, used for the crest centripetal-liftoff test
-  curvature: function (x) {
-    var eps = 6;
-    var yl = this.y(x - eps), yc = this.y(x), yr = this.y(x + eps);
-    return (yr - 2 * yc + yl) / (eps * eps);
   }
 };
 
@@ -371,67 +376,70 @@ var player = {
     this.angle = 0;
   },
 
+  // Unified physics step, modeled on the reference implementations
+  // (haqu/tiny-wings' Box2D body, ncase/Pony-Wings): apply acceleration,
+  // integrate position freely every frame regardless of state, then react
+  // to the terrain afterward. Leaving the ground / landing falls out of
+  // that collision check on its own -- there's no separate analytic
+  // "should I launch" formula to fight with, which is what was producing
+  // near-instant micro-hops instead of real airtime.
   update: function (dt) {
-    if (this.state === "GROUNDED") this.updateGrounded(dt);
-    else this.updateAirborne(dt);
+    var wasGrounded = this.state === "GROUNDED";
+
+    if (this.diveHeld) {
+      if (wasGrounded) {
+        var slope = terrain.slope(this.x);
+        if (slope > TUNING.groundPump.flatEpsilon) {
+          this.vy += TUNING.gravity * TUNING.groundPump.descendMult * dt;
+        } else {
+          this.vx += TUNING.groundPump.ascendForwardAccel * dt;
+        }
+      } else {
+        this.vy += TUNING.gravity * TUNING.diveGravityMult * dt;
+        this.vx += TUNING.diveForwardAccel * dt;
+      }
+    } else {
+      this.vy += TUNING.gravity * dt; // baseline gravity, grounded or not
+    }
+
+    this.vx = clamp(this.vx, TUNING.minForwardVel, TUNING.maxSpeed);
+    this.vy = clamp(this.vy, -TUNING.maxSpeed, TUNING.maxFallSpeed);
+
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    var groundY = terrain.y(this.x);
+    if (this.y >= groundY) {
+      if (wasGrounded) {
+        this.snapToGround(groundY);
+      } else {
+        this.land(groundY);
+      }
+    } else {
+      this.state = "AIRBORNE";
+      this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    }
+
+    this.angle = Math.atan2(this.vy, this.vx);
     this.distance = Math.max(this.distance, this.x);
   },
 
-  updateGrounded: function (dt) {
+  // Continuously-grounded frame: stick to the surface and re-project
+  // velocity onto the new tangent, same math `land()` uses but with no
+  // scoring -- this is what keeps the player following the terrain's curve
+  // (and gaining/losing speed with it) while already skiing.
+  snapToGround: function (groundY) {
+    this.y = groundY;
     var slope = terrain.slope(this.x);
     var invNorm = 1 / Math.sqrt(1 + slope * slope);
     var Tx = invNorm, Ty = slope * invNorm;
 
-    var gAlong = TUNING.gravity * slope * invNorm; // component of gravity along tangent
-    this.speed += gAlong * dt;
-    this.speed = clamp(this.speed, TUNING.minSpeed, TUNING.maxSpeed);
-
-    var vx = Tx * this.speed;
-    var vy = Ty * this.speed;
-
-    // Leave the ground when the curve demands more centripetal pull than
-    // gravity can supply. At a crest the track curves away underneath the
-    // player; geometrically this reduces to speed^2 * y'' > g * (1+slope^2)
-    // (curvature > 0 means convex/crest — valleys never trigger a launch).
-    var curv = terrain.curvature(this.x);
-    var needsLift = curv > 0 && (this.speed * this.speed * curv) > TUNING.gravity * (1 + slope * slope);
-
-    if (needsLift) {
-      this.state = "AIRBORNE";
-      this.vx = vx;
-      this.vy = vy + TUNING.gravity * dt;
-      this.x = this.x + vx * dt;
-      this.y = this.y + vy * dt + 0.5 * TUNING.gravity * dt * dt;
-    } else {
-      this.x = this.x + vx * dt;
-      this.y = terrain.y(this.x);
-      this.vx = vx;
-      this.vy = vy;
-    }
-
-    this.vx = Math.max(this.vx, TUNING.minForwardVel);
-    this.angle = Math.atan2(terrain.slope(this.x), 1);
-  },
-
-  updateAirborne: function (dt) {
-    var gravMult = this.diveHeld ? TUNING.diveGravityMult : 1;
-    this.vy += TUNING.gravity * gravMult * dt;
-    if (this.diveHeld) this.vx += TUNING.diveForwardAccel * dt;
-
-    this.vy = clamp(this.vy, -TUNING.maxSpeed, TUNING.maxFallSpeed);
-    this.vx = clamp(this.vx, TUNING.minForwardVel, TUNING.maxSpeed);
-
-    this.x += this.vx * dt;
-    this.y += this.vy * dt;
-    this.angle = Math.atan2(this.vy, this.vx);
-    // keep .speed live in the air too -- the camera zoom and HUD read this,
-    // and a fast dive can far exceed the grounded tangential speed
-    this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-
-    var groundY = terrain.y(this.x);
-    if (this.y >= groundY) {
-      this.land(groundY);
-    }
+    var speedAlong = this.vx * Tx + this.vy * Ty;
+    speedAlong = clamp(speedAlong, TUNING.minSpeed, TUNING.maxSpeed);
+    this.speed = speedAlong;
+    this.vx = Tx * speedAlong;
+    this.vy = Ty * speedAlong;
+    this.state = "GROUNDED";
   },
 
   land: function (groundY) {
@@ -467,7 +475,6 @@ var player = {
     this.vx = Math.max(Tx * speedMag, TUNING.minForwardVel);
     this.vy = Ty * speedMag;
     this.state = "GROUNDED";
-    this.angle = Math.atan2(slope, 1);
   }
 };
 
@@ -578,8 +585,14 @@ function updateCamera(dt) {
   var vEase = player.state === "AIRBORNE" ? c.easeYAirborne : c.easeY;
   camera.y = easeTowards(camera.y, player.y + lookahead, vEase, dt);
 
+  // zoom out for speed AND for altitude -- being high above the terrain
+  // needs visibility just as much as going fast does, and a dive that's
+  // both fast and high should pull back further than either alone
   var speedRatio = clamp(player.speed / c.zoomSpeedRef, 0, 1);
-  var targetZoom = lerp(c.zoomMax, c.zoomMin, speedRatio);
+  var altitude = Math.max(0, terrain.y(player.x) - player.y);
+  var altRatio = clamp(altitude / c.zoomAltRef, 0, 1);
+  var zoomRatio = clamp(speedRatio + altRatio, 0, 1);
+  var targetZoom = lerp(c.zoomMax, c.zoomMin, zoomRatio);
   camera.zoom = easeTowards(camera.zoom, targetZoom, c.easeZoom, dt);
 }
 
