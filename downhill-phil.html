@@ -79,11 +79,11 @@ var TUNING = {
     easeY: 3.5,               // vertical follow ease rate while grounded (soft/floaty)
     easeYAirborne: 9.0,       // snappier vertical ease in the air so the lookahead below
                               // actually catches up before a (typically brief) flight ends
-    zoomMin: 0.32,            // zoomed out at top speed/fall rate/altitude
+    zoomMin: 0.22,            // zoomed out at top speed/fall rate/altitude
     zoomMax: 1.0,             // zoomed in at low speed
     zoomSpeedRef: 1500,       // px/s speed at which zoom reaches zoomMin
     zoomAltRef: 500,          // px of altitude above terrain at which zoom reaches zoomMin
-    easeZoom: 5.0,            // fast enough to actually catch the target during a short flight
+    easeZoom: 1.6,            // slow, soft transition -- gradual rather than snappy
     vertLookaheadTime: 0.3,   // s, how far ahead of a climb/fall the camera peeks
     vertLookaheadMax: 320     // px, cap on that vertical peek-ahead offset
   },
@@ -178,8 +178,8 @@ var ASSETS = {
   sky: { top: "#8fd3ff", bottom: "#fff3c4" },
 
   backgroundHills: [
-    { fill: "#bfe9c9", parallax: 0.25, ampScale: 0.6, yOffset: -40 },
-    { fill: "#9ed9b6", parallax: 0.5, ampScale: 0.8, yOffset: 10 }
+    { fill: "#bfe9c9", parallax: 0.08, ampScale: 0.4, yOffset: -40 },
+    { fill: "#9ed9b6", parallax: 0.16, ampScale: 0.5, yOffset: 10 }
   ],
 
   clouds: {
@@ -607,7 +607,7 @@ function initClouds() {
       x: randRange(-500, 4000),
       y: randRange(-400, -80),
       scale: randRange(0.6, 1.4),
-      parallax: randRange(0.12, 0.3)
+      parallax: randRange(0.04, 0.12)
     });
   }
 }
@@ -645,8 +645,10 @@ function drawBackgroundHills() {
     var step = 40;
     var first = true;
     for (var wx = worldLeft; wx <= worldRight; wx += step) {
+      // low spatial frequency so this stays one calm, gentle backdrop shape
+      // even when zoomed way out, instead of sprouting extra ripples
       var baseY = TUNING.terrain.baseline + layer.yOffset +
-        Math.sin(wx * 0.0016 + li * 10) * TUNING.terrain.maxAmp * layer.ampScale * 0.5;
+        Math.sin(wx * 0.0004 + li * 10) * TUNING.terrain.maxAmp * layer.ampScale * 0.5;
       var s = worldToScreen(wx * layer.parallax + camera.x * (1 - layer.parallax), baseY);
       if (first) { ctx.moveTo(s.x, s.y); first = false; } else ctx.lineTo(s.x, s.y);
     }
