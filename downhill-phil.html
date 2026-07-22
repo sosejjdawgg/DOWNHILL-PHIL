@@ -83,6 +83,7 @@ var TUNING = {
     zoomMax: 1.0,             // zoomed in at low speed
     zoomSpeedRef: 1500,       // px/s speed at which zoom reaches zoomMin
     zoomAltRef: 500,          // px of altitude above terrain at which zoom reaches zoomMin
+    zoomAirborneMin: 0.45,    // floor on the zoom-out ratio any time we're in the air at all
     easeZoom: 1.6,            // slow, soft transition -- gradual rather than snappy
     vertLookaheadTime: 0.3,   // s, how far ahead of a climb/fall the camera peeks
     vertLookaheadMax: 320     // px, cap on that vertical peek-ahead offset
@@ -579,9 +580,11 @@ function updateCamera(dt) {
   var c = TUNING.camera;
   camera.x = easeTowards(camera.x, player.x, c.easeX, dt);
 
-  // peek ahead in the direction of vertical travel so a fast fall (or climb)
-  // reveals what's coming instead of just centering on where the player is
-  var lookahead = clamp(player.vy * c.vertLookaheadTime, -c.vertLookaheadMax, c.vertLookaheadMax);
+  // Only ever bias the view toward MORE GROUND, never toward more sky.
+  // A signed lookahead (climb = look up) left the player blind on the way
+  // up a jump, since there's nothing useful to see above -- what matters
+  // is the landing zone ahead/below, whether still climbing or falling.
+  var lookahead = clamp(player.vy * c.vertLookaheadTime, 0, c.vertLookaheadMax);
   var vEase = player.state === "AIRBORNE" ? c.easeYAirborne : c.easeY;
   camera.y = easeTowards(camera.y, player.y + lookahead, vEase, dt);
 
@@ -592,6 +595,11 @@ function updateCamera(dt) {
   var altitude = Math.max(0, terrain.y(player.x) - player.y);
   var altRatio = clamp(altitude / c.zoomAltRef, 0, 1);
   var zoomRatio = clamp(speedRatio + altRatio, 0, 1);
+  // any time in the air at all, guarantee at least a minimum pull-back so
+  // the incoming ground is never out of frame, even on a modest hop
+  if (player.state === "AIRBORNE") {
+    zoomRatio = Math.max(zoomRatio, c.zoomAirborneMin);
+  }
   var targetZoom = lerp(c.zoomMax, c.zoomMin, zoomRatio);
   camera.zoom = easeTowards(camera.zoom, targetZoom, c.easeZoom, dt);
 }
