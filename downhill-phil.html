@@ -73,10 +73,10 @@ var TUNING = {
 
   terrain: {
     baseline: 0,              // world Y of the "flat" reference line
-    minWidth: 220,            // narrowest hill half-span-ish segment width
-    maxWidth: 460,            // widest segment width at max difficulty
-    minAmp: 55,               // smallest hill amplitude
-    maxAmp: 230,              // largest hill amplitude at max difficulty
+    minWidth: 140,            // narrowest hill half-span-ish segment width
+    maxWidth: 320,            // widest segment width at max difficulty
+    minAmp: 70,               // smallest hill amplitude
+    maxAmp: 260,              // largest hill amplitude at max difficulty
     hillsPerIsland: 6,        // every N hills = new island color palette
     sampleStep: 10            // px between rendered terrain samples
   },
@@ -253,6 +253,7 @@ var terrain = {
   generatedUntilX: 0,
   hillCount: 0,
   islandIndex: 0,
+  lastDir: -1,
 
   init: function () {
     this.keyPoints = [
@@ -262,21 +263,24 @@ var terrain = {
     this.generatedUntilX = 0;
     this.hillCount = 0;
     this.islandIndex = 0;
+    this.lastDir = -1;
   },
 
   ensureGenerated: function (targetX) {
     while (this.generatedUntilX < targetX) {
       var last = this.keyPoints[this.keyPoints.length - 1];
-      var prev = this.keyPoints[this.keyPoints.length - 2] || last;
       var t = TUNING.terrain;
       var diff = clamp(Math.max(0, last.x) / TUNING.difficulty.rampDistance, 0, 1);
 
       var width = lerp(t.minWidth, t.maxWidth, diff) * randRange(0.75, 1.25);
       var amp = lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
 
-      // bias direction so we don't get long flat runs or endless one-way ramps
-      var goingUp = last.y > prev.y; // last lower on screen (bigger y) than prev => was descending
-      var dir = Math.random() < 0.65 ? (goingUp ? 1 : -1) : (Math.random() < 0.5 ? -1 : 1);
+      // Alternate up/down almost every hill (real Tiny Wings scalloped chain,
+      // each key point a peak or trough) so sharp crests -- and therefore
+      // launches -- come around regularly; an occasional repeat keeps it
+      // from feeling too mechanical.
+      var dir = Math.random() < 0.85 ? -this.lastDir : this.lastDir;
+      this.lastDir = dir;
 
       var newY = clamp(
         t.baseline + dir * amp,
