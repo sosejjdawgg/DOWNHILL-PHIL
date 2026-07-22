@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Downhill Phil</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #111; }
+  canvas { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function () {
+"use strict";
+
+var canvas = document.getElementById("game");
+var ctx = canvas.getContext("2d");
+var W = 0, H = 0, DPR = 1;
+
+function resize() {
+  DPR = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+
+// ---------------------------------------------------------------------------
+// small helpers
+// ---------------------------------------------------------------------------
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function randRange(a, b) { return a + Math.random() * (b - a); }
+function normalizeAngle(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+// frame-rate independent exponential ease: moves `current` toward `target`
+function easeTowards(current, target, rate, dt) {
+  var t = 1 - Math.exp(-rate * dt);
+  return current + (target - current) * t;
+}
+
+// ===========================================================================
+// 1. TUNING — every physics/feel constant lives here
+// ===========================================================================
+var TUNING = {
+  gravity: 1800,              // px/s^2, normal fall acceleration
+  diveGravityMult: 5,         // multiplier applied to gravity while diving
+  diveForwardAccel: 260,      // px/s^2, small forward push while diving
+
+  minSpeed: 180,              // px/s, player is never allowed to fully stall
+  maxSpeed: 2500,             // px/s, overall speed clamp
+  maxFallSpeed: 3000,         // px/s, vertical fall speed clamp
+  minForwardVel: 90,          // px/s, floor on vx so the player never goes backward
+
+  camera: {
+    leadFraction: 0.30,       // player sits 30% of the way across the screen
+    easeX: 8.0,               // horizontal follow ease rate (keeps up with speed)
+    easeY: 3.0,               // vertical follow ease rate (soft/floaty)
+    zoomMin: 0.62,            // zoomed out at top speed
+    zoomMax: 1.0,             // zoomed in at low speed
+    zoomSpeedRef: 1500,       // px/s speed at which zoom reaches zoomMin
+    easeZoom: 2.0
+  },
+
+  terrain: {
+    baseline: 0,              // world Y of the "flat" reference line
+    minWidth: 220,            // narrowest hill half-span-ish segment width
+    maxWidth: 460,            // widest segment width at max difficulty
+    minAmp: 55,               // smallest hill amplitude
+    maxAmp: 230,              // largest hill amplitude at max difficulty
+    hillsPerIsland: 6,        // every N hills = new island color palette
+    sampleStep: 10            // px between rendered terrain samples
+  },
+
+  difficulty: {
+    rampDistance: 24000       // world px over which difficulty ramps to max
+  },
+
+  landing: {
+    perfectAngleThreshold: 20 * Math.PI / 180, // ~20 degrees
+    perfectSpeedBonus: 1.05,  // keep 100%+ speed on a perfect slide
+    penaltyStrength: 1.3,     // how hard bad landings bleed speed
+    minPenaltyFactor: 0.35    // worst-case fraction of speed kept on a slam
+  },
+
+  combo: {
+    step: 0.15,               // score multiplier gained per combo step
+    max: 10
+  },
+
+  sunset: {
+    max: 100,
+    drainRate: 5,             // bar units drained per second
+    refillPerfect: 9,         // refill on a perfect slide
+    refillPickup: 24          // refill from a "time" pickup
+  },
+
+  pickups: {
+    magnetRadius: 100,
+    magnetPull: 6.0,
+    collectRadius: 26,
+    spawnChancePerHill: 0.65,
+    arcHeight: 150,
+    coinScore: 10,
+    boostScore: 5,
+    boostAmount: 480,
+    weights: { coin: 70, boost: 18, time: 12 }
+  },
+
+  fixedDt: 1 / 120
+};
+
+// ===========================================================================
+// 2. ASSETS — every drawable thing routes through this registry.
+//    Re-skin the game by editing this object only; nothing else should
+//    contain a color literal, a shape, or an image reference.
+// ===========================================================================
+var ASSETS = {
+  player: {
+    draw: function (ctx, x, y, angle, state) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      var diving = state === "AIRBORNE_DIVE";
+      ctx.fillStyle = diving ? "#ff5d5d" : "#3b3b3b";
+      ctx.beginPath();
+      ctx.arc(0, 0, 16, 0, Math.PI * 2);
+      ctx.fill();
+      // direction notch so rotation reads clearly (placeholder for Phil-on-a-bike)
+      ctx.fillStyle = "#ffe66d";
+      ctx.beginPath();
+      ctx.moveTo(14, 0);
+      ctx.lineTo(2, -8);
+      ctx.lineTo(2, 8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  },
+
+  terrain: {
+    outline: "#3e7a28",
+    // cycles by island index; each entry is one hill-fill / stripe pair
+    islands: [
+      { fill: "#7ec850", stripe: "#6ab63f" },
+      { fill: "#59b7c4", stripe: "#3f9aa8" },
+      { fill: "#d9a441", stripe: "#c08a2b" },
+      { fill: "#8d7fd6", stripe: "#7266bd" }
+    ]
+  },
+
+  sky: { top: "#8fd3ff", bottom: "#fff3c4" },
+
+  backgroundHills: [
+    { fill: "#bfe9c9", parallax: 0.25, ampScale: 0.6, yOffset: -40 },
+    { fill: "#9ed9b6", parallax: 0.5, ampScale: 0.8, yOffset: 10 }
+  ],
+
+  clouds: {
+    fill: "rgba(255,255,255,0.9)",
+    draw: function (ctx, x, y, scale) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      ctx.fillStyle = ASSETS.clouds.fill;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 34, 16, 0, 0, Math.PI * 2);
+      ctx.ellipse(-24, 6, 22, 13, 0, 0, Math.PI * 2);
+      ctx.ellipse(26, 6, 24, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  },
+
+  pickups: {
+    coin: {
+      color: "#ffd347", ring: "#c98f00",
+      draw: function (ctx, x, y, t) {
+        var bob = Math.sin(t * 4) * 4;
+        ctx.save();
+        ctx.translate(x, y + bob);
+        ctx.fillStyle = ASSETS.pickups.coin.color;
+        ctx.strokeStyle = ASSETS.pickups.coin.ring;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(0, 0, 14, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    },
+    boost: {
+      color: "#ff8a3d", ring: "#b5350a",
+      draw: function (ctx, x, y, t) {
+        var bob = Math.sin(t * 5) * 4;
+        ctx.save();
+        ctx.translate(x, y + bob);
+        ctx.fillStyle = ASSETS.pickups.boost.color;
+        ctx.strokeStyle = ASSETS.pickups.boost.ring;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(0, 0, 16, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    },
+    time: {
+      color: "#7ee8ff", ring: "#1a8fae",
+      draw: function (ctx, x, y, t) {
+        var bob = Math.sin(t * 3.5) * 4;
+        ctx.save();
+        ctx.translate(x, y + bob);
+        ctx.fillStyle = ASSETS.pickups.time.color;
+        ctx.strokeStyle = ASSETS.pickups.time.ring;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(0, 0, 15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  },
+
+  sounds: { perfect: null, land: null, pickup: null }, // stub hooks, no audio yet
+
+  hud: {
+    text: "#1c1c1c",
+    shadow: "rgba(0,0,0,0.35)",
+    sunsetBarBg: "rgba(0,0,0,0.28)",
+    sunsetBarFill: "#ffb703",
+    comboColor: "#ff5d5d",
+    perfectColor: "#ffffff",
+    titleColor: "#ffffff"
+  }
+};
+
+// ===========================================================================
+// 3. Terrain — cosine-interpolated hills, endless generation, culling
+// ===========================================================================
+var terrain = {
+  keyPoints: [],
+  generatedUntilX: 0,
+  hillCount: 0,
+  islandIndex: 0,
+
+  init: function () {
+    this.keyPoints = [
+      { x: -400, y: TUNING.terrain.baseline, hillIndex: 0, islandIndex: 0 },
+      { x: 0, y: TUNING.terrain.baseline, hillIndex: 0, islandIndex: 0 }
+    ];
+    this.generatedUntilX = 0;
+    this.hillCount = 0;
+    this.islandIndex = 0;
+  },
+
+  ensureGenerated: function (targetX) {
+    while (this.generatedUntilX < targetX) {
+      var last = this.keyPoints[this.keyPoints.length - 1];
+      var prev = this.keyPoints[this.keyPoints.length - 2] || last;
+      var t = TUNING.terrain;
+      var diff = clamp(Math.max(0, last.x) / TUNING.difficulty.rampDistance, 0, 1);
+
+      var width = lerp(t.minWidth, t.maxWidth, diff) * randRange(0.75, 1.25);
+      var amp = lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
+
+      // bias direction so we don't get long flat runs or endless one-way ramps
+      var goingUp = last.y > prev.y; // last lower on screen (bigger y) than prev => was descending
+      var dir = Math.random() < 0.65 ? (goingUp ? 1 : -1) : (Math.random() < 0.5 ? -1 : 1);
+
+      var newY = clamp(
+        t.baseline + dir * amp,
+        t.baseline - t.maxAmp * 1.4,
+        t.baseline + t.maxAmp * 1.4
+      );
+      var newX = last.x + width;
+
+      this.hillCount++;
+      if (this.hillCount % t.hillsPerIsland === 0) this.islandIndex++;
+
+      var newPoint = { x: newX, y: newY, hillIndex: this.hillCount, islandIndex: this.islandIndex };
+      this.keyPoints.push(newPoint);
+      this.generatedUntilX = newX;
+
+      pickups.trySpawnForHill(last, newPoint);
+    }
+  },
+
+  cull: function (beforeX) {
+    while (this.keyPoints.length > 4 && this.keyPoints[1].x < beforeX) {
+      this.keyPoints.shift();
+    }
+  },
+
+  // find index i such that keyPoints[i].x <= x < keyPoints[i+1].x
+  segmentIndexAt: function (x) {
+    var kp = this.keyPoints;
+    var lo = 0, hi = kp.length - 2;
+    if (x <= kp[0].x) return 0;
+    if (x >= kp[kp.length - 1].x) return kp.length - 2;
+    while (lo < hi) {
+      var mid = (lo + hi + 1) >> 1;
+      if (kp[mid].x <= x) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  },
+
+  y: function (x) {
+    var kp = this.keyPoints;
+    var i = this.segmentIndexAt(x);
+    var a = kp[i], b = kp[i + 1];
+    if (!b) return a.y;
+    var span = b.x - a.x;
+    var t = span > 0 ? clamp((x - a.x) / span, 0, 1) : 0;
+    var mu2 = (1 - Math.cos(t * Math.PI)) / 2;
+    return a.y * (1 - mu2) + b.y * mu2;
+  },
+
+  slope: function (x) {
+    var eps = 4;
+    return (this.y(x + eps) - this.y(x - eps)) / (2 * eps);
+  },
+
+  // second derivative d2y/dx2, used for the crest centripetal-liftoff test
+  curvature: function (x) {
+    var eps = 6;
+    var yl = this.y(x - eps), yc = this.y(x), yr = this.y(x + eps);
+    return (yr - 2 * yc + yl) / (eps * eps);
+  }
+};
+
+// ===========================================================================
+// 4. Player — grounded/airborne state machine, landing logic, combo
+// ===========================================================================
+var player = {
+  x: 0, y: 0, vx: 0, vy: 0, speed: 0,
+  angle: 0,
+  state: "GROUNDED", // GROUNDED | AIRBORNE
+  diveHeld: false,
+  combo: 0,
+  distance: 0,
+
+  reset: function () {
+    this.x = 0;
+    this.y = terrain.y(0);
+    this.speed = TUNING.minSpeed * 1.3;
+    this.vx = this.speed;
+    this.vy = 0;
+    this.state = "GROUNDED";
+    this.diveHeld = false;
+    this.combo = 0;
+    this.distance = 0;
+    this.angle = 0;
+  },
+
+  update: function (dt) {
+    if (this.state === "GROUNDED") this.updateGrounded(dt);
+    else this.updateAirborne(dt);
+    this.distance = Math.max(this.distance, this.x);
+  },
+
+  updateGrounded: function (dt) {
+    var slope = terrain.slope(this.x);
+    var invNorm = 1 / Math.sqrt(1 + slope * slope);
+    var Tx = invNorm, Ty = slope * invNorm;
+
+    var gAlong = TUNING.gravity * slope * invNorm; // component of gravity along tangent
+    this.speed += gAlong * dt;
+    this.speed = clamp(this.speed, TUNING.minSpeed, TUNING.maxSpeed);
+
+    var vx = Tx * this.speed;
+    var vy = Ty * this.speed;
+
+    // Leave the ground when the curve demands more centripetal pull than
+    // gravity can supply. At a crest the track curves away underneath the
+    // player; geometrically this reduces to speed^2 * y'' > g * (1+slope^2)
+    // (curvature > 0 means convex/crest — valleys never trigger a launch).
+    var curv = terrain.curvature(this.x);
+    var needsLift = curv > 0 && (this.speed * this.speed * curv) > TUNING.gravity * (1 + slope * slope);
+
+    if (needsLift) {
+      this.state = "AIRBORNE";
+      this.vx = vx;
+      this.vy = vy + TUNING.gravity * dt;
+      this.x = this.x + vx * dt;
+      this.y = this.y + vy * dt + 0.5 * TUNING.gravity * dt * dt;
+    } else {
+      this.x = this.x + vx * dt;
+      this.y = terrain.y(this.x);
+      this.vx = vx;
+      this.vy = vy;
+    }
+
+    this.vx = Math.max(this.vx, TUNING.minForwardVel);
+    this.angle = Math.atan2(terrain.slope(this.x), 1);
+  },
+
+  updateAirborne: function (dt) {
+    var gravMult = this.diveHeld ? TUNING.diveGravityMult : 1;
+    this.vy += TUNING.gravity * gravMult * dt;
+    if (this.diveHeld) this.vx += TUNING.diveForwardAccel * dt;
+
+    this.vy = clamp(this.vy, -TUNING.maxSpeed, TUNING.maxFallSpeed);
+    this.vx = clamp(this.vx, TUNING.minForwardVel, TUNING.maxSpeed);
+
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.angle = Math.atan2(this.vy, this.vx);
+
+    var groundY = terrain.y(this.x);
+    if (this.y >= groundY) {
+      this.land(groundY);
+    }
+  },
+
+  land: function (groundY) {
+    this.y = groundY;
+    var slope = terrain.slope(this.x);
+    var invNorm = 1 / Math.sqrt(1 + slope * slope);
+    var Tx = invNorm, Ty = slope * invNorm;
+
+    var speedMag = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    var velAngle = Math.atan2(this.vy, this.vx);
+    var tangentAngle = Math.atan2(Ty, Tx);
+    var delta = Math.abs(normalizeAngle(velAngle - tangentAngle));
+
+    var isDownslope = slope > 0.02;
+    var perfect = isDownslope && delta < TUNING.landing.perfectAngleThreshold;
+
+    if (perfect) {
+      speedMag = Math.min(speedMag * TUNING.landing.perfectSpeedBonus, TUNING.maxSpeed);
+      this.combo = Math.min(this.combo + 1, TUNING.combo.max);
+      game.sunsetTimer = Math.min(TUNING.sunset.max, game.sunsetTimer + TUNING.sunset.refillPerfect);
+      var mult = 1 + this.combo * TUNING.combo.step;
+      game.addScore(Math.round(20 * mult));
+      game.spawnPopup("PERFECT" + (this.combo > 1 ? " x" + this.combo : ""), this.x, this.y - 50, ASSETS.hud.perfectColor);
+    } else {
+      var penalty = clamp(delta / Math.PI, 0, 1) * TUNING.landing.penaltyStrength;
+      var factor = clamp(1 - penalty, TUNING.landing.minPenaltyFactor, 1);
+      speedMag *= factor;
+      this.combo = 0;
+    }
+
+    speedMag = clamp(speedMag, TUNING.minSpeed, TUNING.maxSpeed);
+    this.speed = speedMag;
+    this.vx = Math.max(Tx * speedMag, TUNING.minForwardVel);
+    this.vy = Ty * speedMag;
+    this.state = "GROUNDED";
+    this.angle = Math.atan2(slope, 1);
+  }
+};
+
+// ===========================================================================
+// 5. Pickups — spawner, collision, effects
+// ===========================================================================
+var pickups = {
+  list: [],
+
+  reset: function () { this.list = []; },
+
+  pickWeightedType: function () {
+    var w = TUNING.pickups.weights;
+    var total = w.coin + w.boost + w.time;
+    var r = Math.random() * total;
+    if (r < w.coin) return "coin";
+    r -= w.coin;
+    if (r < w.boost) return "boost";
+    return "time";
+  },
+
+  trySpawnForHill: function (prevKp, newKp) {
+    if (Math.random() > TUNING.pickups.spawnChancePerHill) return;
+    var type = this.pickWeightedType();
+    var wasPeak = newKp.y > prevKp.y; // descending after prev => prev was a local high point
+    var placeArc = wasPeak && Math.random() < 0.5;
+
+    var x, y;
+    if (placeArc) {
+      x = prevKp.x + (newKp.x - prevKp.x) * randRange(0.25, 0.55);
+      y = prevKp.y - TUNING.pickups.arcHeight;
+    } else {
+      x = lerp(prevKp.x, newKp.x, randRange(0.3, 0.7));
+      y = terrain.y(x) - 30;
+    }
+    this.list.push({ type: type, x: x, y: y, collected: false, t: Math.random() * 10 });
+  },
+
+  update: function (dt) {
+    var t = TUNING.pickups;
+    for (var i = 0; i < this.list.length; i++) {
+      var p = this.list[i];
+      if (p.collected) continue;
+      p.t += dt;
+      var dx = player.x - p.x, dy = player.y - p.y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < t.magnetRadius) {
+        var pull = clamp(t.magnetPull * dt, 0, 1);
+        p.x += dx * pull;
+        p.y += dy * pull;
+      }
+      if (dist < t.collectRadius) this.collect(p);
+    }
+    // cull collected / far-behind pickups
+    var cutoff = camera.x - W;
+    this.list = this.list.filter(function (p) { return !p.collected && p.x > cutoff; });
+  },
+
+  collect: function (p) {
+    p.collected = true;
+    var t = TUNING.pickups;
+    if (p.type === "coin") {
+      game.addScore(t.coinScore);
+      game.spawnPopup("+" + t.coinScore, p.x, p.y - 20, ASSETS.pickups.coin.color);
+    } else if (p.type === "boost") {
+      player.speed = Math.min(player.speed + t.boostAmount, TUNING.maxSpeed);
+      var mag = Math.sqrt(player.vx * player.vx + player.vy * player.vy) || 1;
+      var scale = player.speed / mag;
+      player.vx *= scale;
+      player.vy *= scale;
+      game.addScore(t.boostScore);
+      game.spawnPopup("BOOST!", p.x, p.y - 20, ASSETS.pickups.boost.color);
+    } else if (p.type === "time") {
+      game.sunsetTimer = Math.min(TUNING.sunset.max, game.sunsetTimer + TUNING.sunset.refillPickup);
+      game.spawnPopup("+TIME", p.x, p.y - 20, ASSETS.pickups.time.color);
+    }
+  },
+
+  draw: function (ctx) {
+    for (var i = 0; i < this.list.length; i++) {
+      var p = this.list[i];
+      if (p.collected) continue;
+      var s = worldToScreen(p.x, p.y);
+      ASSETS.pickups[p.type].draw(ctx, s.x, s.y, p.t);
+    }
+  }
+};
+
+// ===========================================================================
+// 6. Camera — follow + speed zoom
+// ===========================================================================
+var camera = { x: 0, y: 0, zoom: 1 };
+
+function worldToScreen(wx, wy) {
+  return {
+    x: (wx - camera.x) * camera.zoom + W * TUNING.camera.leadFraction,
+    y: (wy - camera.y) * camera.zoom + H * 0.5
+  };
+}
+
+function updateCamera(dt) {
+  var c = TUNING.camera;
+  camera.x = easeTowards(camera.x, player.x, c.easeX, dt);
+  camera.y = easeTowards(camera.y, player.y, c.easeY, dt);
+  var speedRatio = clamp(player.speed / c.zoomSpeedRef, 0, 1);
+  var targetZoom = lerp(c.zoomMax, c.zoomMin, speedRatio);
+  camera.zoom = easeTowards(camera.zoom, targetZoom, c.easeZoom, dt);
+}
+
+// ===========================================================================
+// clouds (decorative parallax layer)
+// ===========================================================================
+var clouds = [];
+function initClouds() {
+  clouds = [];
+  for (var i = 0; i < 10; i++) {
+    clouds.push({
+      x: randRange(-500, 4000),
+      y: randRange(-400, -80),
+      scale: randRange(0.6, 1.4),
+      parallax: randRange(0.12, 0.3)
+    });
+  }
+}
+
+// ===========================================================================
+// 7. Renderer — sky, parallax hills, terrain, pickups, player, HUD
+// ===========================================================================
+function drawSky() {
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, ASSETS.sky.top);
+  g.addColorStop(1, ASSETS.sky.bottom);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawClouds() {
+  for (var i = 0; i < clouds.length; i++) {
+    var c = clouds[i];
+    var sx = (c.x - camera.x * c.parallax) * camera.zoom + W * TUNING.camera.leadFraction;
+    var sy = c.y * camera.zoom + H * 0.35;
+    var wrapWidth = 4500;
+    sx = ((sx % wrapWidth) + wrapWidth) % wrapWidth - 300;
+    ASSETS.clouds.draw(ctx, sx, sy, c.scale * camera.zoom);
+  }
+}
+
+function drawBackgroundHills() {
+  var layers = ASSETS.backgroundHills;
+  for (var li = 0; li < layers.length; li++) {
+    var layer = layers[li];
+    ctx.fillStyle = layer.fill;
+    ctx.beginPath();
+    var worldLeft = camera.x - W / camera.zoom;
+    var worldRight = camera.x + (W / camera.zoom) * 2;
+    var step = 40;
+    var first = true;
+    for (var wx = worldLeft; wx <= worldRight; wx += step) {
+      var baseY = TUNING.terrain.baseline + layer.yOffset +
+        Math.sin(wx * 0.0016 + li * 10) * TUNING.terrain.maxAmp * layer.ampScale * 0.5;
+      var s = worldToScreen(wx * layer.parallax + camera.x * (1 - layer.parallax), baseY);
+      if (first) { ctx.moveTo(s.x, s.y); first = false; } else ctx.lineTo(s.x, s.y);
+    }
+    ctx.lineTo(W, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawTerrain() {
+  var kp = terrain.keyPoints;
+  var islands = ASSETS.terrain.islands;
+  var worldLeft = camera.x - 200 / camera.zoom;
+  var worldRight = camera.x + (W + 200) / camera.zoom;
+
+  for (var i = 0; i < kp.length - 1; i++) {
+    var a = kp[i], b = kp[i + 1];
+    if (b.x < worldLeft || a.x > worldRight) continue;
+
+    var palette = islands[a.islandIndex % islands.length];
+    var color = (a.hillIndex % 2 === 0) ? palette.fill : palette.stripe;
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    var startS = worldToScreen(a.x, a.y + 4000);
+    ctx.moveTo(startS.x, startS.y);
+
+    var steps = Math.max(2, Math.ceil((b.x - a.x) / TUNING.terrain.sampleStep));
+    for (var s = 0; s <= steps; s++) {
+      var x = lerp(a.x, b.x, s / steps);
+      var y = terrain.y(x);
+      var sc = worldToScreen(x, y);
+      ctx.lineTo(sc.x, sc.y);
+    }
+    var endS = worldToScreen(b.x, b.y + 4000);
+    ctx.lineTo(endS.x, endS.y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // outline stroke along the surface for readability
+  ctx.strokeStyle = ASSETS.terrain.outline;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  var firstPt = true;
+  for (var x2 = worldLeft; x2 <= worldRight; x2 += TUNING.terrain.sampleStep) {
+    var y2 = terrain.y(x2);
+    var sc2 = worldToScreen(x2, y2);
+    if (firstPt) { ctx.moveTo(sc2.x, sc2.y); firstPt = false; } else ctx.lineTo(sc2.x, sc2.y);
+  }
+  ctx.stroke();
+}
+
+function drawPlayer() {
+  var s = worldToScreen(player.x, player.y);
+  var state = (player.state === "AIRBORNE" && player.diveHeld) ? "AIRBORNE_DIVE" : player.state;
+  ASSETS.player.draw(ctx, s.x, s.y, player.angle, state);
+}
+
+function render() {
+  drawSky();
+  drawClouds();
+  drawBackgroundHills();
+  drawTerrain();
+  pickups.draw(ctx);
+  drawPlayer();
+  drawHUD();
+}
+
+// ===========================================================================
+// 8. HUD — score, combo, speed, sunset bar, PERFECT popups, title/gameover
+// ===========================================================================
+function drawHUD() {
+  var hud = ASSETS.hud;
+  ctx.save();
+  ctx.textBaseline = "top";
+  ctx.shadowColor = hud.shadow;
+  ctx.shadowBlur = 4;
+
+  // score
+  ctx.fillStyle = hud.text;
+  ctx.font = "bold 26px sans-serif";
+  ctx.fillText("Score: " + game.score, 16, 14);
+
+  // combo
+  if (player.combo > 1) {
+    ctx.fillStyle = hud.comboColor;
+    ctx.font = "bold 20px sans-serif";
+    ctx.fillText("Combo x" + player.combo, 16, 46);
+  }
+
+  // speed readout
+  ctx.fillStyle = hud.text;
+  ctx.font = "16px sans-serif";
+  ctx.fillText(Math.round(player.speed) + " px/s", 16, 74);
+
+  // sunset bar (top-right)
+  var barW = Math.min(260, W * 0.4), barH = 16;
+  var barX = W - barW - 16, barY = 16;
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = hud.sunsetBarBg;
+  roundRect(ctx, barX, barY, barW, barH, 8);
+  ctx.fill();
+  var frac = clamp(game.sunsetTimer / TUNING.sunset.max, 0, 1);
+  ctx.fillStyle = hud.sunsetBarFill;
+  roundRect(ctx, barX, barY, barW * frac, barH, 8);
+  ctx.fill();
+
+  // popups
+  ctx.font = "bold 22px sans-serif";
+  ctx.textAlign = "center";
+  for (var i = 0; i < game.popups.length; i++) {
+    var p = game.popups[i];
+    var s = worldToScreen(p.x, p.y - (1 - p.life / p.maxLife) * 60);
+    ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1);
+    ctx.fillStyle = p.color;
+    ctx.fillText(p.text, s.x, s.y);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = "left";
+
+  if (game.state === "TITLE") drawTitleScreen();
+  else if (game.state === "GAMEOVER") drawGameOverScreen();
+
+  ctx.restore();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  w = Math.max(w, 0);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawTitleScreen() {
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.fillStyle = ASSETS.hud.titleColor;
+  ctx.font = "bold 56px sans-serif";
+  ctx.fillText("DOWNHILL PHIL", W / 2, H / 2 - 60);
+  ctx.font = "28px sans-serif";
+  ctx.fillText("tap, click, or press space to dive", W / 2, H / 2 + 10);
+  ctx.textAlign = "left";
+}
+
+function drawGameOverScreen() {
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.fillStyle = ASSETS.hud.titleColor;
+  ctx.font = "bold 44px sans-serif";
+  ctx.fillText("The sun has set", W / 2, H / 2 - 70);
+  ctx.font = "bold 32px sans-serif";
+  ctx.fillText("Score: " + game.score, W / 2, H / 2 - 10);
+  ctx.font = "22px sans-serif";
+  ctx.fillText("tap to try again", W / 2, H / 2 + 40);
+  ctx.textAlign = "left";
+}
+
+// ===========================================================================
+// 9. Game — TITLE -> PLAYING -> GAMEOVER, fixed timestep loop, input, resize
+// ===========================================================================
+var game = {
+  state: "TITLE",
+  score: 0,
+  sunsetTimer: TUNING.sunset.max,
+  popups: [],
+  gameOverCooldown: 0,
+
+  start: function () {
+    terrain.init();
+    terrain.ensureGenerated(4000);
+    pickups.reset();
+    player.reset();
+    camera.x = player.x;
+    camera.y = player.y;
+    camera.zoom = TUNING.camera.zoomMax;
+    initClouds();
+    this.score = 0;
+    this.sunsetTimer = TUNING.sunset.max;
+    this.popups = [];
+    this.state = "PLAYING";
+  },
+
+  addScore: function (n) { this.score += n; },
+
+  spawnPopup: function (text, x, y, color) {
+    this.popups.push({ text: text, x: x, y: y, life: 1.0, maxLife: 1.0, color: color });
+  },
+
+  update: function (dt) {
+    if (this.state !== "PLAYING") return;
+
+    player.diveHeld = input.pressed;
+    player.update(dt);
+
+    terrain.ensureGenerated(player.x + 4000);
+    terrain.cull(camera.x - W * 2);
+
+    pickups.update(dt);
+    updateCamera(dt);
+
+    this.sunsetTimer -= TUNING.sunset.drainRate * dt;
+    if (this.sunsetTimer <= 0) {
+      this.sunsetTimer = 0;
+      this.state = "GAMEOVER";
+      this.gameOverCooldown = 0.5;
+    }
+
+    for (var i = this.popups.length - 1; i >= 0; i--) {
+      var p = this.popups[i];
+      p.life -= dt / 0.9;
+      if (p.life <= 0) this.popups.splice(i, 1);
+    }
+  }
+};
+
+// ---------------------------------------------------------------------------
+// input
+// ---------------------------------------------------------------------------
+var input = { pressed: false };
+
+function onPressStart() {
+  if (game.state === "TITLE") {
+    game.start();
+    return;
+  }
+  if (game.state === "GAMEOVER") {
+    if (game.gameOverCooldown <= 0) game.start();
+    return;
+  }
+  input.pressed = true;
+}
+function onPressEnd() {
+  input.pressed = false;
+}
+
+canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); onPressStart(); }, { passive: false });
+window.addEventListener("pointerup", onPressEnd);
+window.addEventListener("pointercancel", onPressEnd);
+window.addEventListener("keydown", function (e) {
+  if (e.code === "Space") { e.preventDefault(); onPressStart(); }
+});
+window.addEventListener("keyup", function (e) {
+  if (e.code === "Space") { e.preventDefault(); onPressEnd(); }
+});
+
+// ---------------------------------------------------------------------------
+// main loop — fixed 120Hz physics step via accumulator
+// ---------------------------------------------------------------------------
+var lastTime = 0, accumulator = 0;
+function frame(now) {
+  var dt = Math.min((now - lastTime) / 1000, 0.25);
+  lastTime = now;
+  accumulator += dt;
+
+  if (game.state === "GAMEOVER" && game.gameOverCooldown > 0) {
+    game.gameOverCooldown -= dt;
+  }
+
+  while (accumulator >= TUNING.fixedDt) {
+    game.update(TUNING.fixedDt);
+    accumulator -= TUNING.fixedDt;
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+
+resize();
+terrain.init();
+terrain.ensureGenerated(4000);
+initClouds();
+camera.x = 0;
+camera.y = terrain.y(0);
+requestAnimationFrame(function (t) { lastTime = t; requestAnimationFrame(frame); });
+
+})();
+</script>
+</body>
+</html>
