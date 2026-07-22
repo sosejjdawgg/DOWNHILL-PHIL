@@ -178,9 +178,13 @@ var ASSETS = {
 
   sky: { top: "#8fd3ff", bottom: "#fff3c4" },
 
+  // Drawn in pure screen space (see drawBackgroundHills) -- deliberately NOT
+  // tied to world Y or camera zoom, just like a painted-far-away backdrop:
+  // only a slow horizontal drift, so zoom/altitude swings during a dive
+  // never make this layer swell, shrink, or jump around.
   backgroundHills: [
-    { fill: "#bfe9c9", parallax: 0.08, ampScale: 0.4, yOffset: -40 },
-    { fill: "#9ed9b6", parallax: 0.16, ampScale: 0.5, yOffset: 10 }
+    { fill: "#cdeed6", parallax: 0.025, wavelength: 900, amp: 22, baseYFrac: 0.5 },
+    { fill: "#aee0bd", parallax: 0.05, wavelength: 620, amp: 30, baseYFrac: 0.56 }
   ],
 
   clouds: {
@@ -610,12 +614,12 @@ function updateCamera(dt) {
 var clouds = [];
 function initClouds() {
   clouds = [];
-  for (var i = 0; i < 10; i++) {
+  for (var i = 0; i < 8; i++) {
     clouds.push({
-      x: randRange(-500, 4000),
-      y: randRange(-400, -80),
-      scale: randRange(0.6, 1.4),
-      parallax: randRange(0.04, 0.12)
+      x: randRange(0, 2000),
+      y: randRange(40, 220),    // fixed screen-space Y -- never moves with camera/zoom
+      scale: randRange(0.6, 1.2),
+      parallax: randRange(0.02, 0.05)
     });
   }
 }
@@ -631,37 +635,35 @@ function drawSky() {
   ctx.fillRect(0, 0, W, H);
 }
 
+var CLOUD_WRAP = 2000;
 function drawClouds() {
   for (var i = 0; i < clouds.length; i++) {
     var c = clouds[i];
-    var sx = (c.x - camera.x * c.parallax) * camera.zoom + W * TUNING.camera.leadFraction;
-    var sy = c.y * camera.zoom + H * 0.35;
-    var wrapWidth = 4500;
-    sx = ((sx % wrapWidth) + wrapWidth) % wrapWidth - 300;
-    ASSETS.clouds.draw(ctx, sx, sy, c.scale * camera.zoom);
+    var scroll = camera.x * c.parallax;
+    var sx = ((c.x - scroll) % CLOUD_WRAP + CLOUD_WRAP) % CLOUD_WRAP - 150;
+    ASSETS.clouds.draw(ctx, sx, c.y, c.scale);
   }
 }
 
+// A distant backdrop, drawn entirely in screen space -- deliberately NOT
+// derived from world Y or camera.zoom (see ASSETS.backgroundHills), so a
+// dive's zoom/altitude swings can never make it swell or jump around.
+// Only a slow horizontal drift, like a painted-far-away hillside.
 function drawBackgroundHills() {
   var layers = ASSETS.backgroundHills;
   for (var li = 0; li < layers.length; li++) {
     var layer = layers[li];
     ctx.fillStyle = layer.fill;
     ctx.beginPath();
-    var worldLeft = camera.x - W / camera.zoom;
-    var worldRight = camera.x + (W / camera.zoom) * 2;
-    var step = 40;
+    var baseY = H * layer.baseYFrac;
+    var scroll = camera.x * layer.parallax;
     var first = true;
-    for (var wx = worldLeft; wx <= worldRight; wx += step) {
-      // low spatial frequency so this stays one calm, gentle backdrop shape
-      // even when zoomed way out, instead of sprouting extra ripples
-      var baseY = TUNING.terrain.baseline + layer.yOffset +
-        Math.sin(wx * 0.0004 + li * 10) * TUNING.terrain.maxAmp * layer.ampScale * 0.5;
-      var s = worldToScreen(wx * layer.parallax + camera.x * (1 - layer.parallax), baseY);
-      if (first) { ctx.moveTo(s.x, s.y); first = false; } else ctx.lineTo(s.x, s.y);
+    for (var sx = -layer.wavelength; sx <= W + layer.wavelength; sx += 20) {
+      var y = baseY + Math.sin((sx + scroll) / layer.wavelength * Math.PI * 2) * layer.amp;
+      if (first) { ctx.moveTo(sx, y); first = false; } else ctx.lineTo(sx, y);
     }
-    ctx.lineTo(W, H);
-    ctx.lineTo(0, H);
+    ctx.lineTo(W + layer.wavelength, H);
+    ctx.lineTo(-layer.wavelength, H);
     ctx.closePath();
     ctx.fill();
   }
