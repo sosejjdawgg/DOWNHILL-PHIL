@@ -153,45 +153,75 @@ var ASSETS = {
     sheet: (function () { var img = new Image(); img.src = PHIL_SPRITE_SRC; return img; })(),
     sheetCols: 3,
     sheetRows: 2,
-    rollCycle: [[0, 0], [1, 0], [2, 0], [0, 1]], // [col,row] per roll frame
-    airCoastFrame: [1, 1],
-    airDiveFrame: [2, 1],
+    frames: null, // populated once from the sheet: 6 isolated per-frame canvases
+    rollCycle: [0, 1, 2, 3], // indices into `frames`, in pedal-cycle order
+    airCoastFrame: 4,
+    airDiveFrame: 5,
     displaySize: 72, // on-screen width/height in world px at zoom 1
     rollCyclesPerSecondAtRef: 3, // pedal cycle rate at rollSpeedRef
     rollSpeedRef: 900, // px/s
 
-    draw: function (ctx, x, y, angle, state, speed) {
+    // Slicing frames straight out of the sheet with drawImage every render
+    // let the browser's smoothing sample a sliver of the *next* frame at
+    // each cell boundary (visible as thin seam lines, worst near the head
+    // where art sits close to the top edge) -- and turning smoothing off to
+    // avoid that made rotation look jagged/choppy instead. Extracting each
+    // frame into its own canvas once removes the neighboring pixels
+    // entirely, so smoothing can stay on for clean rotation with no bleed.
+    _buildFrames: function () {
       var img = this.sheet;
-      ctx.save();
-      ctx.translate(x, y);
-      ctx.rotate(angle);
-
-      if (!img.complete || img.naturalWidth === 0) {
-        // brief fallback while the embedded data-URI image decodes
-        ctx.fillStyle = "#3b3b3b";
-        ctx.beginPath();
-        ctx.arc(0, 0, 16, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-        return;
-      }
-
       var fw = img.naturalWidth / this.sheetCols;
       var fh = img.naturalHeight / this.sheetRows;
-      var frame;
+      var frames = [];
+      for (var r = 0; r < this.sheetRows; r++) {
+        for (var c = 0; c < this.sheetCols; c++) {
+          var cv = document.createElement("canvas");
+          cv.width = fw;
+          cv.height = fh;
+          var cctx = cv.getContext("2d");
+          cctx.imageSmoothingEnabled = false; // exact 1:1 pixel copy
+          cctx.drawImage(img, c * fw, r * fh, fw, fh, 0, 0, fw, fh);
+          frames.push(cv);
+        }
+      }
+      this.frames = frames;
+    },
+
+    draw: function (ctx, x, y, angle, state, speed) {
+      if (!this.frames) {
+        if (this.sheet.complete && this.sheet.naturalWidth > 0) {
+          this._buildFrames();
+        } else {
+          // brief fallback while the embedded data-URI image decodes
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(angle);
+          ctx.fillStyle = "#3b3b3b";
+          ctx.beginPath();
+          ctx.arc(0, 0, 16, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          return;
+        }
+      }
+
+      var idx;
       if (state === "AIRBORNE_DIVE") {
-        frame = this.airDiveFrame;
+        idx = this.airDiveFrame;
       } else if (state === "AIRBORNE") {
-        frame = this.airCoastFrame;
+        idx = this.airCoastFrame;
       } else {
         var cyclesPerSecond = this.rollCyclesPerSecondAtRef * (speed / this.rollSpeedRef);
         var phase = (performance.now() / 1000) * cyclesPerSecond;
-        var idx = Math.floor(phase % this.rollCycle.length);
-        frame = this.rollCycle[idx];
+        idx = this.rollCycle[Math.floor(phase % this.rollCycle.length)];
       }
 
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      ctx.imageSmoothingEnabled = true; // safe now -- the source frame has no neighbors to bleed in
       var half = this.displaySize / 2;
-      ctx.drawImage(img, frame[0] * fw, frame[1] * fh, fw, fh, -half, -half, this.displaySize, this.displaySize);
+      ctx.drawImage(this.frames[idx], -half, -half, this.displaySize, this.displaySize);
       ctx.restore();
     }
   },
