@@ -53,7 +53,7 @@ function easeTowards(current, target, rate, dt) {
 // ===========================================================================
 var TUNING = {
   gravity: 1800,              // px/s^2, normal fall acceleration
-  diveGravityMult: 5,         // multiplier applied to gravity while diving
+  diveGravityMult: 4,         // multiplier applied to gravity while diving
   diveForwardAccel: 260,      // px/s^2, small forward push while diving
 
   minSpeed: 180,              // px/s, player is never allowed to fully stall
@@ -64,11 +64,15 @@ var TUNING = {
   camera: {
     leadFraction: 0.30,       // player sits 30% of the way across the screen
     easeX: 8.0,               // horizontal follow ease rate (keeps up with speed)
-    easeY: 3.0,               // vertical follow ease rate (soft/floaty)
-    zoomMin: 0.62,            // zoomed out at top speed
+    easeY: 3.5,               // vertical follow ease rate while grounded (soft/floaty)
+    easeYAirborne: 9.0,       // snappier vertical ease in the air so the lookahead below
+                              // actually catches up before a (typically brief) flight ends
+    zoomMin: 0.42,            // zoomed out at top speed/fall rate
     zoomMax: 1.0,             // zoomed in at low speed
     zoomSpeedRef: 1500,       // px/s speed at which zoom reaches zoomMin
-    easeZoom: 2.0
+    easeZoom: 2.5,
+    vertLookaheadTime: 0.3,   // s, how far ahead of a climb/fall the camera peeks
+    vertLookaheadMax: 320     // px, cap on that vertical peek-ahead offset
   },
 
   terrain: {
@@ -420,6 +424,9 @@ var player = {
     this.x += this.vx * dt;
     this.y += this.vy * dt;
     this.angle = Math.atan2(this.vy, this.vx);
+    // keep .speed live in the air too -- the camera zoom and HUD read this,
+    // and a fast dive can far exceed the grounded tangential speed
+    this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
 
     var groundY = terrain.y(this.x);
     if (this.y >= groundY) {
@@ -564,7 +571,13 @@ function worldToScreen(wx, wy) {
 function updateCamera(dt) {
   var c = TUNING.camera;
   camera.x = easeTowards(camera.x, player.x, c.easeX, dt);
-  camera.y = easeTowards(camera.y, player.y, c.easeY, dt);
+
+  // peek ahead in the direction of vertical travel so a fast fall (or climb)
+  // reveals what's coming instead of just centering on where the player is
+  var lookahead = clamp(player.vy * c.vertLookaheadTime, -c.vertLookaheadMax, c.vertLookaheadMax);
+  var vEase = player.state === "AIRBORNE" ? c.easeYAirborne : c.easeY;
+  camera.y = easeTowards(camera.y, player.y + lookahead, vEase, dt);
+
   var speedRatio = clamp(player.speed / c.zoomSpeedRef, 0, 1);
   var targetZoom = lerp(c.zoomMax, c.zoomMin, speedRatio);
   camera.zoom = easeTowards(camera.zoom, targetZoom, c.easeZoom, dt);
