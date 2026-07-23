@@ -99,7 +99,7 @@ var TUNING = {
   },
 
   difficulty: {
-    rampDistance: 48000       // world px over which difficulty ramps to max
+    rampDistance: 96000       // world px over which difficulty ramps to max
   },
 
   // The finite journey: three named legs back to back. Reaching the end of
@@ -108,14 +108,14 @@ var TUNING = {
   // as you approach home.
   journey: {
     sections: [
-      { name: "GATESHEAD", length: 16000 },
-      { name: "WASHINGTON", length: 16000 },
-      { name: "SUNDERLAND", length: 16000 }
+      { name: "GATESHEAD", length: 32000 },
+      { name: "WASHINGTON", length: 32000 },
+      { name: "SUNDERLAND", length: 32000 }
     ]
   },
 
   mission: {
-    timeLimit: 180            // s, must reach home before this runs out
+    timeLimit: 360            // s, must reach home before this runs out
   },
 
   // The finish: Phil doesn't just cross a line, he glides to a scripted
@@ -169,7 +169,11 @@ var TUNING = {
   battery: {
     max: 100,
     drainRate: 6,             // bar units drained per second while dive is held
-    refillPickup: 40          // refill from a battery pickup
+    refillPickup: 40,         // refill granted only once the whole row below is collected
+    rechargeRate: 90,         // bar units/sec the meter animates up at once a row completes
+    rowSize: 4,               // batteries per row -- only the row's leader is visible/collectible
+                              // at a time; collecting it reveals the next one
+    rowSpacing: 90            // world px between consecutive batteries along the hill contour
   },
 
   pickups: {
@@ -880,12 +884,14 @@ var player = {
         game.addScore(doubled);
         game.scorePulse = 1;
         game.spawnAirResolve("double", pending, doubled, this.x, this.y);
+        playChaChingSound();
       } else if (isBail) {
         game.spawnAirResolve("lost", pending, 0, this.x, this.y);
       } else {
         game.addScore(pending);
         game.scorePulse = 1;
         game.spawnAirResolve("banked", pending, pending, this.x, this.y);
+        playChaChingSound();
       }
     }
     this.airTimeScore = 0;
@@ -943,17 +949,21 @@ var pickups = {
     var wasPeak = newKp.y > prevKp.y; // descending after prev => prev was a local high point
 
     if (type === "battery") {
-      // the battery is a single, more significant pickup -- never split
-      // into a group, always floated well clear of the ground
-      var bx, by;
-      if (wasPeak) {
-        bx = lerp(prevKp.x, newKp.x, 0.4);
-        by = prevKp.y - TUNING.pickups.arcHeight;
-      } else {
-        bx = lerp(prevKp.x, newKp.x, randRange(0.3, 0.7));
-        by = terrain.y(bx) - 50;
+      // A row of batteries hugging the hill's own contour -- only the
+      // first is visible/collectible; collecting it reveals the next one
+      // in sequence. The charge is only granted once the whole row is
+      // collected, so a half-finished row pays out nothing.
+      var span = newKp.x - prevKp.x;
+      var n = TUNING.battery.rowSize;
+      var spacing = Math.min(TUNING.battery.rowSpacing, span / (n + 1.5));
+      var startT = randRange(0.12, 0.3);
+      var startX = prevKp.x + span * startT;
+      var group = { size: n, revealIndex: 0 };
+      for (var bi = 0; bi < n; bi++) {
+        var px = startX + bi * spacing;
+        var py = terrain.y(px) - 42; // hovers just clear of the ground, riding the slope's own shape
+        this.list.push({ type: type, x: px, y: py, collected: false, t: Math.random() * 10, small: false, group: group, groupIndex: bi });
       }
-      this.list.push({ type: type, x: bx, y: by, collected: false, t: Math.random() * 10, small: false });
       return;
     }
 
@@ -983,6 +993,7 @@ var pickups = {
       var p = this.list[i];
       if (p.collected) continue;
       p.t += dt;
+      if (p.group && p.groupIndex !== p.group.revealIndex) continue; // still hidden -- not this one's turn yet
       var dx = player.x - p.x, dy = player.y - p.y;
       var dist = Math.sqrt(dx * dx + dy * dy);
       if (dist < t.magnetRadius) {
@@ -1012,8 +1023,14 @@ var pickups = {
       game.addScore(t.boostScore);
       game.spawnPopup("BOOST!", p.x, p.y - 20, ASSETS.pickups.boost.color);
     } else if (p.type === "battery") {
-      game.battery = Math.min(TUNING.battery.max, game.battery + TUNING.battery.refillPickup);
-      game.spawnPopup("+BATTERY", p.x, p.y - 20, ASSETS.pickups.battery.color);
+      p.group.revealIndex++;
+      if (p.group.revealIndex >= p.group.size) {
+        game.startBatteryRecharge(TUNING.battery.refillPickup);
+        game.spawnPopup("FULL CHARGE!", p.x, p.y - 24, ASSETS.pickups.battery.color);
+        playChargeCompleteSound();
+      } else {
+        playBuzzSound(p.groupIndex);
+      }
     }
   },
 
@@ -1021,6 +1038,7 @@ var pickups = {
     for (var i = 0; i < this.list.length; i++) {
       var p = this.list[i];
       if (p.collected) continue;
+      if (p.group && p.groupIndex !== p.group.revealIndex) continue; // stay hidden until it's revealed
       var s = worldToScreen(p.x, p.y);
       ASSETS.pickups[p.type].draw(ctx, s.x, s.y, p.t, p.small ? 0.65 : 1);
     }
@@ -1630,6 +1648,77 @@ function playTickSound(index) {
   osc.stop(now + 0.08);
 }
 
+// A little "cha-ching" -- two quick ascending bell notes -- played right
+// as a landing locks the airtime bonus into the real score (banked or
+// doubled). Not played on a bail/lost bonus, since nothing was gained.
+function playChaChingSound() {
+  if (soundMuted) return;
+  var ctx2 = ensureAudioCtx();
+  if (!ctx2) return;
+  var now = ctx2.currentTime;
+  var notes = [1046.5, 1318.5]; // C6 then E6
+  for (var i = 0; i < notes.length; i++) {
+    var t0 = now + i * 0.07;
+    var osc = ctx2.createOscillator();
+    var gain = ctx2.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(notes[i], t0);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.22, t0 + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+    osc.connect(gain);
+    gain.connect(ctx2.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.24);
+  }
+}
+
+// Short electric "zzt" for collecting one battery in a row -- a wobbling
+// sawtooth rather than a clean tone, so it reads as "charge" rather than
+// "score". Pitch nudges up with index so a row builds a little excitement.
+function playBuzzSound(index) {
+  if (soundMuted) return;
+  var ctx2 = ensureAudioCtx();
+  if (!ctx2) return;
+  var now = ctx2.currentTime;
+  var baseFreq = 180 + index * 25;
+  var osc = ctx2.createOscillator();
+  var gain = ctx2.createGain();
+  osc.type = "sawtooth";
+  osc.frequency.setValueAtTime(baseFreq, now);
+  osc.frequency.linearRampToValueAtTime(baseFreq * 1.4, now + 0.03);
+  osc.frequency.linearRampToValueAtTime(baseFreq, now + 0.06);
+  osc.frequency.linearRampToValueAtTime(baseFreq * 1.4, now + 0.09);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.14, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+  osc.connect(gain);
+  gain.connect(ctx2.destination);
+  osc.start(now);
+  osc.stop(now + 0.14);
+}
+
+// A fuller rising sweep played once the whole row is collected and the
+// battery actually starts recharging.
+function playChargeCompleteSound() {
+  if (soundMuted) return;
+  var ctx2 = ensureAudioCtx();
+  if (!ctx2) return;
+  var now = ctx2.currentTime;
+  var osc = ctx2.createOscillator();
+  var gain = ctx2.createGain();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(300, now);
+  osc.frequency.exponentialRampToValueAtTime(900, now + 0.28);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.25, now + 0.03);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
+  osc.connect(gain);
+  gain.connect(ctx2.destination);
+  osc.start(now);
+  osc.stop(now + 0.34);
+}
+
 // Bottom-left corner -- always clear of the score/battery HUD panels in
 // every game state, so it never has to push other UI around.
 var MUTE_BTN = { cx: 30, r: 17 };
@@ -2029,6 +2118,7 @@ var game = {
   isNewHighScore: false,
   airResolve: null, // {type, amount, awarded, x, y, life, maxLife} -- brief "doubled/lost/banked" flash right after a landing
   scoreRevealTimer: 0, // s since GAMEOVER/WIN began -- drives the score tally-up on the end screen
+  batteryRechargeTarget: TUNING.battery.max, // battery eases up to this instead of snapping, for a satisfying fill
 
   start: function () {
     terrain.init();
@@ -2043,6 +2133,7 @@ var game = {
     confetti = [];
     this.score = 0;
     this.battery = TUNING.battery.max;
+    this.batteryRechargeTarget = TUNING.battery.max;
     this.missionTimer = TUNING.mission.timeLimit;
     this.sectionIndex = 0;
     this.failReason = "";
@@ -2059,6 +2150,10 @@ var game = {
   },
 
   addScore: function (n) { this.score += n; },
+
+  startBatteryRecharge: function (amount) {
+    this.batteryRechargeTarget = Math.min(TUNING.battery.max, this.battery + amount);
+  },
 
   spawnPopup: function (text, x, y, color) {
     this.popups.push({ text: text, x: x, y: y, life: 1.0, maxLife: 1.0, color: color });
@@ -2099,6 +2194,12 @@ var game = {
     // battery only drains while actively diving -- coasting is free
     if (input.pressed) {
       this.battery -= TUNING.battery.drainRate * dt;
+      this.batteryRechargeTarget = Math.min(this.batteryRechargeTarget, this.battery);
+    }
+    // ease up toward a pending recharge target instead of snapping, so a
+    // completed battery row visibly fills the meter rather than jumping
+    if (this.battery < this.batteryRechargeTarget) {
+      this.battery = Math.min(this.batteryRechargeTarget, this.battery + TUNING.battery.rechargeRate * dt);
     }
     if (this.battery <= 0) {
       this.battery = 0;
