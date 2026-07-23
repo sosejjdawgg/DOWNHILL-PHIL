@@ -1376,13 +1376,14 @@ function drawHUD() {
   ctx.save();
   ctx.textBaseline = "top";
 
-  // top-left status panel: score, combo, speed, section
+  // top-left status panel: score, combo, speed, section -- shifted down to
+  // leave the mute button room in the corner above it
   ctx.fillStyle = hud.panelBg;
-  roundRect(ctx, 6, 6, 226, 108, 14);
+  roundRect(ctx, 6, 50, 226, 108, 14);
   ctx.fill();
   ctx.strokeStyle = hud.panelBorder;
   ctx.lineWidth = 1;
-  roundRect(ctx, 6, 6, 226, 108, 14);
+  roundRect(ctx, 6, 50, 226, 108, 14);
   ctx.stroke();
 
   ctx.shadowColor = hud.shadow;
@@ -1393,7 +1394,7 @@ function drawHUD() {
   ctx.font = "bold 26px sans-serif";
   var scorePulseScale = 1 + 0.35 * game.scorePulse;
   ctx.save();
-  ctx.translate(16, 14);
+  ctx.translate(16, 58);
   ctx.scale(scorePulseScale, scorePulseScale);
   ctx.fillText("Score: " + game.score, 0, 0);
   ctx.restore();
@@ -1402,19 +1403,19 @@ function drawHUD() {
   if (player.combo > 1) {
     ctx.fillStyle = hud.comboColor;
     ctx.font = "bold 20px sans-serif";
-    ctx.fillText("Combo x" + player.combo, 16, 46);
+    ctx.fillText("Combo x" + player.combo, 16, 90);
   }
 
   // speed readout
   ctx.fillStyle = hud.speedColor;
   ctx.font = "16px sans-serif";
-  ctx.fillText(Math.round(player.speed) + " px/s", 16, 74);
+  ctx.fillText(Math.round(player.speed) + " px/s", 16, 118);
 
   // current section name, small persistent label
   var sectionName = TUNING.journey.sections[game.sectionIndex] ? TUNING.journey.sections[game.sectionIndex].name : "";
   ctx.fillStyle = hud.sectionColor;
   ctx.font = "bold 14px sans-serif";
-  ctx.fillText(sectionName, 16, 96);
+  ctx.fillText(sectionName, 16, 140);
 
   // top-right panel: battery bar (with bolt icon) + mission timer
   var barW = Math.min(220, W * 0.36), barH = 16;
@@ -1508,6 +1509,59 @@ function drawHUD() {
   else if (game.state === "GAMEOVER") drawGameOverScreen();
   else if (game.state === "WIN") drawWinScreen();
 
+  // drawn last so it always sits on top of the title/game-over/win overlays too
+  drawMuteButton();
+
+  ctx.restore();
+}
+
+// Fixed top-left mute toggle -- always tappable, in every game state.
+var MUTE_BTN = { cx: 30, cy: 28, r: 17 };
+function isMuteButtonHit(x, y) {
+  var dx = x - MUTE_BTN.cx, dy = y - MUTE_BTN.cy;
+  return dx * dx + dy * dy <= MUTE_BTN.r * MUTE_BTN.r;
+}
+function drawMuteButton() {
+  var b = MUTE_BTN;
+  ctx.save();
+  ctx.fillStyle = "rgba(20,10,40,0.55)";
+  ctx.beginPath();
+  ctx.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.translate(b.cx, b.cy);
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+
+  // speaker body + cone
+  ctx.beginPath();
+  ctx.moveTo(-8, -4);
+  ctx.lineTo(-3, -4);
+  ctx.lineTo(3, -9);
+  ctx.lineTo(3, 9);
+  ctx.lineTo(-3, 4);
+  ctx.lineTo(-8, 4);
+  ctx.closePath();
+  ctx.fill();
+
+  if (bgmAudio.muted) {
+    ctx.beginPath();
+    ctx.moveTo(-9, -9);
+    ctx.lineTo(9, 9);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.arc(2, 0, 6, -0.6, 0.6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(2, 0, 10, -0.7, 0.7);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -2069,7 +2123,16 @@ function onPressEnd() {
   input.pressed = false;
 }
 
-canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); onPressStart(); }, { passive: false });
+canvas.addEventListener("pointerdown", function (e) {
+  e.preventDefault();
+  var rect = canvas.getBoundingClientRect();
+  var x = e.clientX - rect.left, y = e.clientY - rect.top;
+  if (isMuteButtonHit(x, y)) {
+    bgmAudio.muted = !bgmAudio.muted;
+    return;
+  }
+  onPressStart();
+}, { passive: false });
 window.addEventListener("pointerup", onPressEnd);
 window.addEventListener("pointercancel", onPressEnd);
 window.addEventListener("keydown", function (e) {
