@@ -19,6 +19,13 @@ var canvas = document.getElementById("game");
 var ctx = canvas.getContext("2d");
 var W = 0, H = 0, DPR = 1;
 
+// Terrain is rendered into this low-res buffer, then blown back up onto the
+// main canvas with smoothing off -- that's what gives it hard, blocky pixel
+// edges instead of smooth anti-aliased curves (see drawTerrain/render).
+var TERRAIN_PIXEL_SIZE = 4; // screen px per "big pixel" block
+var terrainBuf = document.createElement("canvas");
+var terrainBufCtx = terrainBuf.getContext("2d");
+
 function resize() {
   DPR = window.devicePixelRatio || 1;
   W = window.innerWidth;
@@ -28,6 +35,9 @@ function resize() {
   canvas.style.width = W + "px";
   canvas.style.height = H + "px";
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  terrainBuf.width = Math.max(1, Math.ceil(W / TERRAIN_PIXEL_SIZE));
+  terrainBuf.height = Math.max(1, Math.ceil(H / TERRAIN_PIXEL_SIZE));
 }
 window.addEventListener("resize", resize);
 
@@ -791,7 +801,10 @@ function drawBackgroundHills() {
   }
 }
 
-function drawTerrain() {
+// Draws into whatever context is passed in (the low-res terrain buffer --
+// see render()) so the shapes themselves are unaffected; the blocky pixel
+// look comes entirely from rendering small and scaling back up unsmoothed.
+function drawTerrain(targetCtx) {
   var kp = terrain.keyPoints;
   var islands = ASSETS.terrain.islands;
   var worldLeft = camera.x - 200 / camera.zoom;
@@ -804,35 +817,35 @@ function drawTerrain() {
     var palette = islands[a.islandIndex % islands.length];
     var color = (a.hillIndex % 2 === 0) ? palette.fill : palette.stripe;
 
-    ctx.fillStyle = color;
-    ctx.beginPath();
+    targetCtx.fillStyle = color;
+    targetCtx.beginPath();
     var startS = worldToScreen(a.x, a.y + 4000);
-    ctx.moveTo(startS.x, startS.y);
+    targetCtx.moveTo(startS.x, startS.y);
 
     var steps = Math.max(2, Math.ceil((b.x - a.x) / TUNING.terrain.sampleStep));
     for (var s = 0; s <= steps; s++) {
       var x = lerp(a.x, b.x, s / steps);
       var y = terrain.y(x);
       var sc = worldToScreen(x, y);
-      ctx.lineTo(sc.x, sc.y);
+      targetCtx.lineTo(sc.x, sc.y);
     }
     var endS = worldToScreen(b.x, b.y + 4000);
-    ctx.lineTo(endS.x, endS.y);
-    ctx.closePath();
-    ctx.fill();
+    targetCtx.lineTo(endS.x, endS.y);
+    targetCtx.closePath();
+    targetCtx.fill();
   }
 
   // outline stroke along the surface for readability
-  ctx.strokeStyle = ASSETS.terrain.outline;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
+  targetCtx.strokeStyle = ASSETS.terrain.outline;
+  targetCtx.lineWidth = 3;
+  targetCtx.beginPath();
   var firstPt = true;
   for (var x2 = worldLeft; x2 <= worldRight; x2 += TUNING.terrain.sampleStep) {
     var y2 = terrain.y(x2);
     var sc2 = worldToScreen(x2, y2);
-    if (firstPt) { ctx.moveTo(sc2.x, sc2.y); firstPt = false; } else ctx.lineTo(sc2.x, sc2.y);
+    if (firstPt) { targetCtx.moveTo(sc2.x, sc2.y); firstPt = false; } else targetCtx.lineTo(sc2.x, sc2.y);
   }
-  ctx.stroke();
+  targetCtx.stroke();
 }
 
 function drawPlayer() {
@@ -852,7 +865,16 @@ function render() {
   drawSky();
   drawClouds();
   drawBackgroundHills();
-  drawTerrain();
+
+  terrainBufCtx.clearRect(0, 0, terrainBuf.width, terrainBuf.height);
+  terrainBufCtx.save();
+  terrainBufCtx.scale(1 / TERRAIN_PIXEL_SIZE, 1 / TERRAIN_PIXEL_SIZE);
+  drawTerrain(terrainBufCtx);
+  terrainBufCtx.restore();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(terrainBuf, 0, 0, terrainBuf.width, terrainBuf.height, 0, 0, W, H);
+  ctx.imageSmoothingEnabled = true;
+
   pickups.draw(ctx);
   drawPlayer();
   drawHUD();
