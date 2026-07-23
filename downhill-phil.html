@@ -127,14 +127,18 @@ var TUNING = {
     decelRate: 1400,          // px/s^2 braking rate during the glide
     stopSpeed: 30,            // px/s, below this the glide counts as stopped
     celebrateDuration: 2.5,   // s, hang time on the celebration before WIN
-    confettiCount: 36
+    confettiCount: 36,
+    flatZoneLength: 2000      // px of guaranteed level ground before the house (comfortably longer
+                               // than any single hill's max width so the flat run never gets clipped)
   },
 
   landing: {
-    perfectAngleThreshold: 20 * Math.PI / 180, // ~20 degrees
+    perfectAngleThreshold: 32 * Math.PI / 180, // ~32 degrees -- forgiving enough that a landing near a
+                                                // hilltop crest (where the curve's slope eases toward
+                                                // zero by construction) still reads as smooth
     perfectSpeedBonus: 1.05,  // keep 100%+ speed on a perfect slide
-    penaltyStrength: 1.3,     // how hard bad landings bleed speed
-    minPenaltyFactor: 0.35,   // worst-case fraction of speed kept on a slam
+    penaltyStrength: 0.85,    // how hard bad landings bleed speed (softer than before)
+    minPenaltyFactor: 0.55,   // worst-case fraction of speed kept on a slam (higher floor, less choppy)
     bailAngleThreshold: 100 * Math.PI / 180, // beyond this mismatch it's a full bail, not just a rough landing
     bailDuration: 0.7,        // s, tumbling before regaining control
     bailSpeedFactor: 0.3,     // fraction of impact speed kept through a bail
@@ -556,13 +560,35 @@ var terrain = {
 
   ensureGenerated: function (targetX) {
     targetX = Math.min(targetX, JOURNEY_TOTAL_DISTANCE);
+    var flatStartX = JOURNEY_TOTAL_DISTANCE - TUNING.finish.flatZoneLength;
+
     while (this.generatedUntilX < targetX) {
       var last = this.keyPoints[this.keyPoints.length - 1];
+
+      // Once the last hill has carried us into the flat-approach zone,
+      // stop rolling hills entirely and lay one final point at baseline
+      // right at the house -- guarantees the finish always sits on level
+      // ground instead of wherever a random hill happened to end.
+      if (last.x >= flatStartX) {
+        this.hillCount++;
+        var flatPoint = { x: JOURNEY_TOTAL_DISTANCE, y: TUNING.terrain.baseline, hillIndex: this.hillCount };
+        this.keyPoints.push(flatPoint);
+        this.generatedUntilX = JOURNEY_TOTAL_DISTANCE;
+        break;
+      }
+
       var t = TUNING.terrain;
       var diff = clamp(Math.max(0, last.x) / TUNING.difficulty.rampDistance, 0, 1);
 
       var width = lerp(t.minWidth, t.maxWidth, diff) * randRange(0.75, 1.25);
       var amp = lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
+
+      // The very first hill gets a longer run so the opening descent
+      // reads as a proper kicker ramp -- room to build speed before the
+      // crest right after it launches the first small jump.
+      if (this.hillCount === 0) {
+        width *= 1.7;
+      }
 
       // Strictly alternate up/down every hill -- matching haqu/tiny-wings'
       // terrain generator (`sign *= -1` each key point) -- so every key
@@ -570,12 +596,20 @@ var terrain = {
       var dir = -this.lastDir;
       this.lastDir = dir;
 
-      var newY = clamp(
-        t.baseline + dir * amp,
-        t.baseline - t.maxAmp * 1.4,
-        t.baseline + t.maxAmp * 1.4
-      );
       var newX = last.x + width;
+      var newY;
+      if (newX >= flatStartX) {
+        // final approach hill -- ease all the way to baseline over its
+        // natural width instead of to another random peak/trough, so the
+        // flat run after it starts smoothly rather than as a jump cut
+        newY = t.baseline;
+      } else {
+        newY = clamp(
+          t.baseline + dir * amp,
+          t.baseline - t.maxAmp * 1.4,
+          t.baseline + t.maxAmp * 1.4
+        );
+      }
 
       this.hillCount++;
 
@@ -637,6 +671,8 @@ var player = {
   bailSpin: 0,    // accumulated visual tumble rotation while bailing
   airTime: 0,     // s, continuous time airborne this flight (resets on landing)
   airTicks: 0,    // whole seconds of airTime already scored this flight
+  airTimeScore: 0,   // score accumulated in the air this flight, shown as a floating counter above Phil
+  airCounterPulse: 0, // 0-1, decaying "punch" applied to that counter on each tick
 
   reset: function () {
     this.x = 0;
@@ -653,6 +689,8 @@ var player = {
     this.bailSpin = 0;
     this.airTime = 0;
     this.airTicks = 0;
+    this.airTimeScore = 0;
+    this.airCounterPulse = 0;
   },
 
   // Unified physics step, modeled on the reference implementations
@@ -664,6 +702,10 @@ var player = {
   // near-instant micro-hops instead of real airtime.
   update: function (dt) {
     var wasGrounded = this.state === "GROUNDED";
+
+    if (this.airCounterPulse > 0) {
+      this.airCounterPulse = Math.max(0, this.airCounterPulse - dt / TUNING.airtime.pulseDuration);
+    }
 
     if (this.bailTimer > 0 && wasGrounded) {
       this.bailTimer = Math.max(0, this.bailTimer - dt);
@@ -737,6 +779,7 @@ var player = {
   land: function (groundY) {
     this.airTime = 0;
     this.airTicks = 0;
+    this.airTimeScore = 0;
     this.y = groundY;
     var slope = terrain.slope(this.x);
     var invNorm = 1 / Math.sqrt(1 + slope * slope);
@@ -747,7 +790,12 @@ var player = {
     var tangentAngle = Math.atan2(Ty, Tx);
     var delta = Math.abs(normalizeAngle(velAngle - tangentAngle));
 
-    var isDownslope = slope > 0.02;
+    // The terrain's cosine easing means slope reads ~0 exactly at every
+    // hilltop/valley keypoint by construction -- so a landing timed right
+    // at a crest would almost always fail a strict "must be descending"
+    // check through no fault of the player. Only exclude a genuine
+    // uphill-face slam here; a flat or gently-rising crest still counts.
+    var isDownslope = slope > -0.3;
     var perfect = isDownslope && delta < TUNING.landing.perfectAngleThreshold;
 
     if (perfect) {
@@ -1150,6 +1198,35 @@ function drawPlayer() {
   ASSETS.player.draw(ctx, s.x, s.y, angle, state, player.speed);
 }
 
+// Floating running total of airtime score, hovering above Phil while
+// he's in the air -- punches (scale + white flash + brighter glow) each
+// time a new second of airtime ticks in, on top of the existing +N popup.
+function drawAirtimeCounter() {
+  if (player.state !== "AIRBORNE" || player.airTimeScore <= 0) return;
+  var s = worldToScreen(player.x, player.y);
+  var bob = Math.sin(performance.now() / 260) * 4;
+  var pulseScale = 1 + 0.5 * player.airCounterPulse;
+  var text = "+" + player.airTimeScore;
+
+  ctx.save();
+  ctx.translate(s.x, s.y - 74 + bob);
+  ctx.scale(pulseScale, pulseScale);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold 26px sans-serif";
+  ctx.shadowColor = ASSETS.hud.airtimeColor;
+  ctx.shadowBlur = 10 + 16 * player.airCounterPulse;
+  ctx.fillStyle = ASSETS.hud.airtimeColor;
+  ctx.fillText(text, 0, 0);
+  if (player.airCounterPulse > 0) {
+    ctx.globalAlpha = player.airCounterPulse;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(text, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
 function drawHouse() {
   var groundY = terrain.y(JOURNEY_TOTAL_DISTANCE);
   var s = worldToScreen(JOURNEY_TOTAL_DISTANCE, groundY);
@@ -1165,6 +1242,7 @@ function render() {
   pickups.draw(ctx);
   drawSpeedStreaks();
   drawPlayer();
+  drawAirtimeCounter();
   drawConfetti();
   drawHUD();
 }
@@ -1591,6 +1669,8 @@ var game = {
     this.addScore(TUNING.airtime.scorePerSecond);
     this.spawnPopup("+" + TUNING.airtime.scorePerSecond, player.x, player.y - 40, ASSETS.hud.airtimeColor);
     this.scorePulse = 1;
+    player.airTimeScore += TUNING.airtime.scorePerSecond;
+    player.airCounterPulse = 1;
   },
 
   update: function (dt) {
