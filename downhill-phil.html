@@ -118,15 +118,19 @@ var TUNING = {
     timeLimit: 360            // s, must reach home before this runs out
   },
 
-  // The finish: Phil doesn't just cross a line, he glides to a scripted
-  // stop outside the house waiting at the end of Sunderland, then a short
-  // celebration plays before the WIN screen appears.
+  // The finish: Phil doesn't just cross a line, he glides in and rides
+  // straight through the front door of the house waiting at the end of
+  // Sunderland, disappearing inside -- then, after a beat, pops up
+  // celebrating in the upstairs window before the WIN screen appears.
   finish: {
     decelDistance: 1400,      // px before the house where the scripted glide begins
-    stopOffset: 160,          // px short of the house where Phil comes to rest
+    doorOffset: 34,           // px before the house's center where the doorway sits -- Phil
+                              // rides through here and disappears, rather than stopping short
     decelRate: 1400,          // px/s^2 braking rate during the glide
-    stopSpeed: 30,            // px/s, below this the glide counts as stopped
-    celebrateDuration: 2.5,   // s, hang time on the celebration before WIN
+    minEntrySpeed: 90,        // px/s floor kept during the glide so he visibly rides IN through
+                              // the door instead of crawling to a stop just before it
+    hiddenDuration: 0.7,      // s spent out of sight after riding through the door
+    celebrateDuration: 2.5,   // s hang time celebrating in the window before WIN
     confettiCount: 36,
     flatZoneLength: 2000      // px of guaranteed level ground before the house (comfortably longer
                                // than any single hill's max width so the flat run never gets clipped)
@@ -153,7 +157,9 @@ var TUNING = {
   },
 
   airtime: {
-    tickInterval: 0.1,        // s between ticks -- fast, immediate-feeling ascent right off a launch
+    startDelay: 1.5,          // s of continuous airtime before the counter/ticking kicks in at all --
+                              // skips the noise of every little hop and only rewards real airtime
+    tickInterval: 0.1,        // s between ticks once past startDelay -- fast, ascending feel
     scorePerTick: 1,          // pending score banked per tick, resolved on landing (not added immediately)
     pulseDuration: 0.16,      // s, how long the HUD score "punch" animation lasts per tick
     resolveDuration: 1.0,     // s, how long the landing resolution (doubled/crossed-out/banked) stays on screen
@@ -802,7 +808,8 @@ var player = {
       this.bailTimer = 0; // a real launch off a crest ends the tumble
 
       this.airTime += dt;
-      var ticksSoFar = Math.floor(this.airTime / TUNING.airtime.tickInterval);
+      var pastDelay = this.airTime - TUNING.airtime.startDelay;
+      var ticksSoFar = pastDelay > 0 ? Math.floor(pastDelay / TUNING.airtime.tickInterval) : 0;
       if (ticksSoFar > this.airTicks) {
         this.airTicks = ticksSoFar;
         game.onAirtimeTick();
@@ -1319,6 +1326,8 @@ function drawTerrain(targetCtx) {
 }
 
 function drawPlayer() {
+  // out of sight once he's ridden through the door -- he's inside the house
+  if (game.state === "FINISHING" && game.finishPhase !== "approaching") return;
   var s = worldToScreen(player.x, player.y);
   var state, angle;
   if (player.bailTimer > 0) {
@@ -1420,12 +1429,50 @@ function drawHouse() {
   ASSETS.house.draw(ctx, s.x, s.y, performance.now() / 1000);
 }
 
+// A simple figure -- head and two arms thrown up -- bouncing in the
+// window with a warm glow behind it, once Phil's ridden inside and the
+// celebration phase kicks in.
+function drawWindowCelebration() {
+  if (game.state !== "FINISHING" || game.finishPhase !== "celebrating") return;
+  var wx = JOURNEY_TOTAL_DISTANCE + ASSETS.house.width * 0.08 + 23;
+  var wy = terrain.y(JOURNEY_TOTAL_DISTANCE) - ASSETS.house.height + 39;
+  var s = worldToScreen(wx, wy);
+  var t = performance.now() / 1000;
+
+  ctx.save();
+  var glowPulse = 0.5 + 0.5 * Math.sin(t * 4);
+  ctx.fillStyle = "rgba(255,230,150," + (0.35 + 0.25 * glowPulse) + ")";
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, 22, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  var bounce = Math.abs(Math.sin(t * 5)) * 7;
+  ctx.save();
+  ctx.translate(s.x, s.y - bounce);
+  ctx.fillStyle = "#f2c49b";
+  ctx.beginPath();
+  ctx.arc(0, 1, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#2f6fd6";
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(-5, 6);
+  ctx.lineTo(-11, -4);
+  ctx.moveTo(5, 6);
+  ctx.lineTo(11, -4);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function render() {
   drawSky();
   drawClouds();
   drawBackgroundHills();
   drawTerrain(ctx);
   drawHouse();
+  drawWindowCelebration();
   pickups.draw(ctx);
   drawSpeedStreaks();
   drawPlayer();
@@ -2113,8 +2160,9 @@ var game = {
   sectionBanner: null, // {text, life, maxLife} -- one big centered "road sign" at a time
   gameOverCooldown: 0,
   scorePulse: 0, // 0-1, decaying "punch" applied to the HUD score text on each airtime tick
-  finishStopped: false, // FINISHING sub-phase: still gliding in (false) vs. stopped & celebrating (true)
-  celebrateTimer: 0,
+  finishPhase: "approaching", // FINISHING sub-phase: "approaching" (riding to the door) ->
+                              // "hidden" (inside, out of sight) -> "celebrating" (in the window)
+  finishTimer: 0,             // s elapsed in the current finishPhase
   isNewHighScore: false,
   airResolve: null, // {type, amount, awarded, x, y, life, maxLife} -- brief "doubled/lost/banked" flash right after a landing
   scoreRevealTimer: 0, // s since GAMEOVER/WIN began -- drives the score tally-up on the end screen
@@ -2139,8 +2187,8 @@ var game = {
     this.failReason = "";
     this.popups = [];
     this.scorePulse = 0;
-    this.finishStopped = false;
-    this.celebrateTimer = 0;
+    this.finishPhase = "approaching";
+    this.finishTimer = 0;
     this.isNewHighScore = false;
     this.airResolve = null;
     this.scoreRevealTimer = 0;
@@ -2232,8 +2280,8 @@ var game = {
 
     if (player.x >= JOURNEY_TOTAL_DISTANCE - TUNING.finish.decelDistance) {
       this.state = "FINISHING";
-      this.finishStopped = false;
-      this.celebrateTimer = 0;
+      this.finishPhase = "approaching";
+      this.finishTimer = 0;
       this.sectionBanner = null;
       return;
     }
@@ -2259,11 +2307,12 @@ var game = {
     }
   },
 
-  // Scripted "coast to a stop outside the house" glide, entered once the
-  // player crosses into the finish stretch -- input no longer drives the
-  // player here, so this replaces the normal physics update for the
-  // remainder of the run. Once stopped, a short celebration (confetti +
-  // popup) plays before finally flipping to the WIN screen.
+  // Scripted glide into the finish, entered once the player crosses into
+  // the finish stretch -- input no longer drives the player here, so this
+  // replaces the normal physics update for the remainder of the run.
+  // Three beats: ride through the front door and disappear inside, a brief
+  // pause out of sight, then pop up celebrating in the window before
+  // finally flipping to the WIN screen.
   updateFinishing: function (dt) {
     terrain.ensureGenerated(player.x + 2000);
     terrain.cull(camera.x - W * 2);
@@ -2271,34 +2320,38 @@ var game = {
     updateSpeedStreaks(dt);
     updateConfetti(dt);
 
-    if (!this.finishStopped) {
-      var targetX = JOURNEY_TOTAL_DISTANCE - TUNING.finish.stopOffset;
-      player.speed = Math.max(0, player.speed - TUNING.finish.decelRate * dt);
+    if (this.finishPhase === "approaching") {
+      var doorX = JOURNEY_TOTAL_DISTANCE - TUNING.finish.doorOffset;
+      // decelerate toward a floor, not zero, so he visibly rides IN through
+      // the door rather than crawling to a stop just short of it
+      player.speed = Math.max(TUNING.finish.minEntrySpeed, player.speed - TUNING.finish.decelRate * dt);
       var slope = terrain.slope(player.x);
       var invNorm = 1 / Math.sqrt(1 + slope * slope);
       var Tx = invNorm, Ty = slope * invNorm;
       player.vx = Tx * player.speed;
       player.vy = Ty * player.speed;
       player.angle = Math.atan2(player.vy, player.vx);
-      player.x = Math.min(player.x + player.vx * dt, targetX);
+      player.x = Math.min(player.x + player.vx * dt, doorX);
       player.y = terrain.y(player.x);
       player.state = "GROUNDED";
 
-      if (player.speed <= TUNING.finish.stopSpeed || player.x >= targetX) {
-        player.speed = 0;
-        player.vx = 0;
-        player.vy = 0;
-        player.angle = 0;
-        player.x = targetX;
-        player.y = terrain.y(targetX);
-        this.finishStopped = true;
-        this.celebrateTimer = 0;
-        spawnConfetti(player.x, player.y);
-        this.spawnPopup("HOME!", player.x, player.y - 70, ASSETS.hud.perfectColor);
+      if (player.x >= doorX) {
+        this.finishPhase = "hidden";
+        this.finishTimer = 0;
       }
-    } else {
-      this.celebrateTimer += dt;
-      if (this.celebrateTimer >= TUNING.finish.celebrateDuration) {
+    } else if (this.finishPhase === "hidden") {
+      this.finishTimer += dt;
+      if (this.finishTimer >= TUNING.finish.hiddenDuration) {
+        this.finishPhase = "celebrating";
+        this.finishTimer = 0;
+        var wx = JOURNEY_TOTAL_DISTANCE + ASSETS.house.width * 0.08 + 23;
+        var wy = terrain.y(JOURNEY_TOTAL_DISTANCE) - ASSETS.house.height + 39;
+        spawnConfetti(wx, wy);
+        this.spawnPopup("HOME!", wx, wy - 50, ASSETS.hud.perfectColor);
+      }
+    } else { // celebrating
+      this.finishTimer += dt;
+      if (this.finishTimer >= TUNING.finish.celebrateDuration) {
         this.state = "WIN";
         this.gameOverCooldown = 0.5;
         this.scoreRevealTimer = 0;
