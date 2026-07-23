@@ -95,27 +95,39 @@ var TUNING = {
     maxWidth: 460,            // widest segment width at max difficulty
     minAmp: 215,              // smallest hill amplitude (roomy relative to Phil's sprite)
     maxAmp: 240,              // largest hill amplitude at max difficulty
-    hillsPerIsland: 6,        // every N hills = new island color palette
     pixelBlockSize: 8         // world px per stair-step block (crisp pixel-art terrain)
   },
 
   difficulty: {
-    rampDistance: 24000       // world px over which difficulty ramps to max
+    rampDistance: 48000       // world px over which difficulty ramps to max
   },
 
   // The finite journey: three named legs back to back. Reaching the end of
-  // the last one is the win condition. rampDistance above spans the whole
-  // trip, so terrain gets toughest right as you approach home.
+  // the last one (the house at the end of Sunderland) is the win condition.
+  // rampDistance above spans the whole trip, so terrain gets toughest right
+  // as you approach home.
   journey: {
     sections: [
-      { name: "GATESHEAD", length: 8000 },
-      { name: "WASHINGTON", length: 8000 },
-      { name: "HOME", length: 8000 }
+      { name: "GATESHEAD", length: 16000 },
+      { name: "WASHINGTON", length: 16000 },
+      { name: "SUNDERLAND", length: 16000 }
     ]
   },
 
   mission: {
-    timeLimit: 90             // s, must reach home before this runs out
+    timeLimit: 180            // s, must reach home before this runs out
+  },
+
+  // The finish: Phil doesn't just cross a line, he glides to a scripted
+  // stop outside the house waiting at the end of Sunderland, then a short
+  // celebration plays before the WIN screen appears.
+  finish: {
+    decelDistance: 1400,      // px before the house where the scripted glide begins
+    stopOffset: 160,          // px short of the house where Phil comes to rest
+    decelRate: 1400,          // px/s^2 braking rate during the glide
+    stopSpeed: 30,            // px/s, below this the glide counts as stopped
+    celebrateDuration: 2.5,   // s, hang time on the celebration before WIN
+    confettiCount: 36
   },
 
   landing: {
@@ -303,14 +315,85 @@ var ASSETS = {
   },
 
   terrain: {
-    outline: "#3e7a28",
-    // cycles by island index; each entry is one hill-fill / stripe pair
-    islands: [
-      { fill: "#7ec850", stripe: "#6ab63f" },
-      { fill: "#59b7c4", stripe: "#3f9aa8" },
-      { fill: "#d9a441", stripe: "#c08a2b" },
-      { fill: "#8d7fd6", stripe: "#7266bd" }
+    // One themed fill/stripe/outline pair per journey section (see
+    // TUNING.journey.sections) -- terrain color identifies which leg of
+    // the trip you're on: Gateshead brown, Washington orange, Sunderland green.
+    sectionPalettes: [
+      { fill: "#a9754a", stripe: "#8f6238", outline: "#5c3f22" }, // Gateshead -- brown
+      { fill: "#e0913f", stripe: "#c67931", outline: "#8a4f1a" }, // Washington -- orange
+      { fill: "#7ec850", stripe: "#6ab63f", outline: "#3e7a28" }  // Sunderland -- green
     ]
+  },
+
+  // The finish-line landmark: a cosy cottage waiting at the end of
+  // Sunderland. Drawn at a fixed screen size (matching the player/pickups
+  // convention) anchored to its world-space ground contact point.
+  house: {
+    wall: "#e8c78a",
+    wallShade: "#c9a468",
+    roof: "#8a3b2b",
+    roofShade: "#6d2c20",
+    door: "#5c3a21",
+    window: "#bfe8ff",
+    windowFrame: "#5c3a21",
+    chimney: "#8a7566",
+    smoke: "rgba(255,255,255,0.55)",
+    width: 150,
+    height: 120,
+    draw: function (ctx, x, groundY, t) {
+      var w = this.width, h = this.height;
+      ctx.save();
+      ctx.translate(x, groundY);
+
+      // walls
+      ctx.fillStyle = this.wall;
+      ctx.fillRect(-w / 2, -h, w, h);
+      ctx.fillStyle = this.wallShade;
+      ctx.fillRect(-w / 2, -h, w * 0.16, h);
+
+      // roof
+      ctx.fillStyle = this.roof;
+      ctx.beginPath();
+      ctx.moveTo(-w / 2 - 18, -h);
+      ctx.lineTo(0, -h - 74);
+      ctx.lineTo(w / 2 + 18, -h);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = this.roofShade;
+      ctx.beginPath();
+      ctx.moveTo(0, -h - 74);
+      ctx.lineTo(w / 2 + 18, -h);
+      ctx.lineTo(w / 2 - 8, -h);
+      ctx.closePath();
+      ctx.fill();
+
+      // chimney + drifting smoke
+      ctx.fillStyle = this.chimney;
+      ctx.fillRect(w * 0.2, -h - 58, 18, 42);
+      ctx.fillStyle = this.smoke;
+      for (var i = 0; i < 3; i++) {
+        var puffT = (t * 0.4 + i / 3) % 1;
+        var puffX = w * 0.2 + 9 + Math.sin((t + i) * 2) * 6;
+        var puffY = -h - 62 - puffT * 55;
+        ctx.globalAlpha = (1 - puffT) * 0.55;
+        ctx.beginPath();
+        ctx.arc(puffX, puffY, 8 + puffT * 10, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // window
+      ctx.fillStyle = this.windowFrame;
+      ctx.fillRect(w * 0.08, -h + 20, 46, 38);
+      ctx.fillStyle = this.window;
+      ctx.fillRect(w * 0.08 + 4, -h + 24, 38, 30);
+
+      // door
+      ctx.fillStyle = this.door;
+      ctx.fillRect(-w / 2 + 22, -44, 38, 44);
+
+      ctx.restore();
+    }
   },
 
   sky: { top: "#8fd3ff", bottom: "#fff3c4" },
@@ -429,17 +512,15 @@ var terrain = {
   keyPoints: [],
   generatedUntilX: 0,
   hillCount: 0,
-  islandIndex: 0,
   lastDir: -1,
 
   init: function () {
     this.keyPoints = [
-      { x: -400, y: TUNING.terrain.baseline, hillIndex: 0, islandIndex: 0 },
-      { x: 0, y: TUNING.terrain.baseline, hillIndex: 0, islandIndex: 0 }
+      { x: -400, y: TUNING.terrain.baseline, hillIndex: 0 },
+      { x: 0, y: TUNING.terrain.baseline, hillIndex: 0 }
     ];
     this.generatedUntilX = 0;
     this.hillCount = 0;
-    this.islandIndex = 0;
     this.lastDir = -1;
   },
 
@@ -467,9 +548,8 @@ var terrain = {
       var newX = last.x + width;
 
       this.hillCount++;
-      if (this.hillCount % t.hillsPerIsland === 0) this.islandIndex++;
 
-      var newPoint = { x: newX, y: newY, hillIndex: this.hillCount, islandIndex: this.islandIndex };
+      var newPoint = { x: newX, y: newY, hillIndex: this.hillCount };
       this.keyPoints.push(newPoint);
       this.generatedUntilX = newX;
 
@@ -851,6 +931,50 @@ function drawSpeedStreaks() {
 }
 
 // ===========================================================================
+// confetti -- celebration burst played once Phil stops outside the house
+// ===========================================================================
+var confetti = [];
+var CONFETTI_COLORS = ["#ff5d5d", "#ffd347", "#7ee8ff", "#7ec850", "#ff8a3d", "#ffffff"];
+function spawnConfetti(x, y) {
+  for (var i = 0; i < TUNING.finish.confettiCount; i++) {
+    confetti.push({
+      x: x + randRange(-30, 30),
+      y: y - randRange(0, 40),
+      vx: randRange(-160, 160),
+      vy: randRange(-420, -180),
+      color: CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)],
+      size: randRange(4, 8),
+      rot: randRange(0, Math.PI * 2),
+      spin: randRange(-8, 8),
+      life: randRange(1.4, 2.2)
+    });
+  }
+}
+function updateConfetti(dt) {
+  for (var i = confetti.length - 1; i >= 0; i--) {
+    var c = confetti[i];
+    c.vy += TUNING.gravity * 0.5 * dt;
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.rot += c.spin * dt;
+    c.life -= dt;
+    if (c.life <= 0) confetti.splice(i, 1);
+  }
+}
+function drawConfetti() {
+  for (var i = 0; i < confetti.length; i++) {
+    var c = confetti[i];
+    var s = worldToScreen(c.x, c.y);
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(c.rot);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.size / 2, -c.size / 2, c.size, c.size * 0.6);
+    ctx.restore();
+  }
+}
+
+// ===========================================================================
 // clouds (decorative parallax layer)
 // ===========================================================================
 var clouds = [];
@@ -920,7 +1044,7 @@ function drawBackgroundHills() {
 // while scrolling instead of shimmering/crawling.
 function drawTerrain(targetCtx) {
   var kp = terrain.keyPoints;
-  var islands = ASSETS.terrain.islands;
+  var palettes = ASSETS.terrain.sectionPalettes;
   var worldLeft = camera.x - 200 / camera.zoom;
   var worldRight = camera.x + (W + 200) / camera.zoom;
   var block = TUNING.terrain.pixelBlockSize;
@@ -928,15 +1052,25 @@ function drawTerrain(targetCtx) {
   var startX = Math.floor(worldLeft / block) * block;
   var endX = Math.ceil(worldRight / block) * block;
 
-  targetCtx.beginPath();
   var prevBlockY = null;
+  var currentOutline = null;
+  var pathOpen = false;
+  function flushOutline() {
+    if (pathOpen) {
+      targetCtx.strokeStyle = currentOutline;
+      targetCtx.lineWidth = 2;
+      targetCtx.stroke();
+      pathOpen = false;
+    }
+  }
+
   for (var wx = startX; wx < endX; wx += block) {
     var sampleX = wx + block * 0.5;
     var worldY = terrain.y(sampleX);
     var blockY = Math.round(worldY / block) * block;
 
     var seg = kp[terrain.segmentIndexAt(sampleX)];
-    var palette = islands[seg.islandIndex % islands.length];
+    var palette = palettes[Math.min(sectionIndexAtDistance(sampleX), palettes.length - 1)];
     var color = (seg.hillIndex % 2 === 0) ? palette.fill : palette.stripe;
 
     var topLeft = worldToScreen(wx, blockY);
@@ -952,8 +1086,16 @@ function drawTerrain(targetCtx) {
     targetCtx.fillRect(rx, ry, rw, rh);
 
     // stepped outline: a flat tread across this column, a vertical riser
-    // wherever the height changed from the column before it
-    if (prevBlockY === null) {
+    // wherever the height changed from the column before it -- flush and
+    // restart the stroke path whenever the section (and its outline
+    // color) changes at a boundary
+    if (palette.outline !== currentOutline) {
+      flushOutline();
+      currentOutline = palette.outline;
+      targetCtx.beginPath();
+      targetCtx.moveTo(topLeft.x, topLeft.y);
+      pathOpen = true;
+    } else if (prevBlockY === null) {
       targetCtx.moveTo(topLeft.x, topLeft.y);
     } else if (blockY !== prevBlockY) {
       targetCtx.lineTo(topLeft.x, topLeft.y);
@@ -962,10 +1104,7 @@ function drawTerrain(targetCtx) {
     targetCtx.lineTo(topRight.x, topRight.y);
     prevBlockY = blockY;
   }
-
-  targetCtx.strokeStyle = ASSETS.terrain.outline;
-  targetCtx.lineWidth = 2;
-  targetCtx.stroke();
+  flushOutline();
 }
 
 function drawPlayer() {
@@ -981,14 +1120,22 @@ function drawPlayer() {
   ASSETS.player.draw(ctx, s.x, s.y, angle, state, player.speed);
 }
 
+function drawHouse() {
+  var groundY = terrain.y(JOURNEY_TOTAL_DISTANCE);
+  var s = worldToScreen(JOURNEY_TOTAL_DISTANCE, groundY);
+  ASSETS.house.draw(ctx, s.x, s.y, performance.now() / 1000);
+}
+
 function render() {
   drawSky();
   drawClouds();
   drawBackgroundHills();
   drawTerrain(ctx);
+  drawHouse();
   pickups.draw(ctx);
   drawSpeedStreaks();
   drawPlayer();
+  drawConfetti();
   drawHUD();
 }
 
@@ -1150,7 +1297,7 @@ function drawWinScreen() {
 // 9. Game — TITLE -> PLAYING -> GAMEOVER, fixed timestep loop, input, resize
 // ===========================================================================
 var game = {
-  state: "TITLE", // TITLE | PLAYING | GAMEOVER | WIN
+  state: "TITLE", // TITLE | PLAYING | FINISHING | GAMEOVER | WIN
   score: 0,
   battery: TUNING.battery.max,
   missionTimer: TUNING.mission.timeLimit,
@@ -1160,6 +1307,8 @@ var game = {
   sectionBanner: null, // {text, life, maxLife} -- one big centered "road sign" at a time
   gameOverCooldown: 0,
   scorePulse: 0, // 0-1, decaying "punch" applied to the HUD score text on each airtime tick
+  finishStopped: false, // FINISHING sub-phase: still gliding in (false) vs. stopped & celebrating (true)
+  celebrateTimer: 0,
 
   start: function () {
     terrain.init();
@@ -1171,6 +1320,7 @@ var game = {
     camera.zoom = TUNING.camera.zoomMax;
     initClouds();
     speedStreaks = [];
+    confetti = [];
     this.score = 0;
     this.battery = TUNING.battery.max;
     this.missionTimer = TUNING.mission.timeLimit;
@@ -1178,6 +1328,8 @@ var game = {
     this.failReason = "";
     this.popups = [];
     this.scorePulse = 0;
+    this.finishStopped = false;
+    this.celebrateTimer = 0;
     this.state = "PLAYING";
     this.showSectionBanner(TUNING.journey.sections[0].name);
   },
@@ -1199,6 +1351,7 @@ var game = {
   },
 
   update: function (dt) {
+    if (this.state === "FINISHING") { this.updateFinishing(dt); return; }
     if (this.state !== "PLAYING") return;
 
     player.diveHeld = input.pressed;
@@ -1240,9 +1393,10 @@ var game = {
       this.showSectionBanner(TUNING.journey.sections[newSection].name);
     }
 
-    if (player.x >= JOURNEY_TOTAL_DISTANCE) {
-      this.state = "WIN";
-      this.gameOverCooldown = 0.5;
+    if (player.x >= JOURNEY_TOTAL_DISTANCE - TUNING.finish.decelDistance) {
+      this.state = "FINISHING";
+      this.finishStopped = false;
+      this.celebrateTimer = 0;
       this.sectionBanner = null;
       return;
     }
@@ -1260,6 +1414,58 @@ var game = {
 
     if (this.scorePulse > 0) {
       this.scorePulse = Math.max(0, this.scorePulse - dt / TUNING.airtime.pulseDuration);
+    }
+  },
+
+  // Scripted "coast to a stop outside the house" glide, entered once the
+  // player crosses into the finish stretch -- input no longer drives the
+  // player here, so this replaces the normal physics update for the
+  // remainder of the run. Once stopped, a short celebration (confetti +
+  // popup) plays before finally flipping to the WIN screen.
+  updateFinishing: function (dt) {
+    terrain.ensureGenerated(player.x + 2000);
+    terrain.cull(camera.x - W * 2);
+    updateCamera(dt);
+    updateSpeedStreaks(dt);
+    updateConfetti(dt);
+
+    if (!this.finishStopped) {
+      var targetX = JOURNEY_TOTAL_DISTANCE - TUNING.finish.stopOffset;
+      player.speed = Math.max(0, player.speed - TUNING.finish.decelRate * dt);
+      var slope = terrain.slope(player.x);
+      var invNorm = 1 / Math.sqrt(1 + slope * slope);
+      var Tx = invNorm, Ty = slope * invNorm;
+      player.vx = Tx * player.speed;
+      player.vy = Ty * player.speed;
+      player.angle = Math.atan2(player.vy, player.vx);
+      player.x = Math.min(player.x + player.vx * dt, targetX);
+      player.y = terrain.y(player.x);
+      player.state = "GROUNDED";
+
+      if (player.speed <= TUNING.finish.stopSpeed || player.x >= targetX) {
+        player.speed = 0;
+        player.vx = 0;
+        player.vy = 0;
+        player.angle = 0;
+        player.x = targetX;
+        player.y = terrain.y(targetX);
+        this.finishStopped = true;
+        this.celebrateTimer = 0;
+        spawnConfetti(player.x, player.y);
+        this.spawnPopup("HOME!", player.x, player.y - 70, ASSETS.hud.perfectColor);
+      }
+    } else {
+      this.celebrateTimer += dt;
+      if (this.celebrateTimer >= TUNING.finish.celebrateDuration) {
+        this.state = "WIN";
+        this.gameOverCooldown = 0.5;
+      }
+    }
+
+    for (var i = this.popups.length - 1; i >= 0; i--) {
+      var p = this.popups[i];
+      p.life -= dt / 0.9;
+      if (p.life <= 0) this.popups.splice(i, 1);
     }
   }
 };
