@@ -19,13 +19,6 @@ var canvas = document.getElementById("game");
 var ctx = canvas.getContext("2d");
 var W = 0, H = 0, DPR = 1;
 
-// Terrain is rendered into this low-res buffer, then blown back up onto the
-// main canvas with smoothing off -- that's what gives it hard, blocky pixel
-// edges instead of smooth anti-aliased curves (see drawTerrain/render).
-var TERRAIN_PIXEL_SIZE = 4; // screen px per "big pixel" block
-var terrainBuf = document.createElement("canvas");
-var terrainBufCtx = terrainBuf.getContext("2d");
-
 function resize() {
   DPR = window.devicePixelRatio || 1;
   W = window.innerWidth;
@@ -35,9 +28,6 @@ function resize() {
   canvas.style.width = W + "px";
   canvas.style.height = H + "px";
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-
-  terrainBuf.width = Math.max(1, Math.ceil(W / TERRAIN_PIXEL_SIZE));
-  terrainBuf.height = Math.max(1, Math.ceil(H / TERRAIN_PIXEL_SIZE));
 }
 window.addEventListener("resize", resize);
 
@@ -106,7 +96,7 @@ var TUNING = {
     minAmp: 215,              // smallest hill amplitude (roomy relative to Phil's sprite)
     maxAmp: 240,              // largest hill amplitude at max difficulty
     hillsPerIsland: 6,        // every N hills = new island color palette
-    sampleStep: 10            // px between rendered terrain samples
+    pixelBlockSize: 20        // world px per stair-step block (crisp pixel-art terrain)
   },
 
   difficulty: {
@@ -801,50 +791,60 @@ function drawBackgroundHills() {
   }
 }
 
-// Draws into whatever context is passed in (the low-res terrain buffer --
-// see render()) so the shapes themselves are unaffected; the blocky pixel
-// look comes entirely from rendering small and scaling back up unsmoothed.
+// Renders the terrain as a staircase of flat-shaded rectangular columns
+// instead of a smooth curve -- genuine blocky pixel-art geometry, drawn
+// sharp at full resolution (no downsampling/blur, unlike an upscaled
+// low-res buffer). The column grid is anchored to WORLD space (not screen
+// space), so a given stretch of hill always quantizes to the same blocks
+// regardless of scroll position -- that's what keeps the steps stable
+// while scrolling instead of shimmering/crawling.
 function drawTerrain(targetCtx) {
   var kp = terrain.keyPoints;
   var islands = ASSETS.terrain.islands;
   var worldLeft = camera.x - 200 / camera.zoom;
   var worldRight = camera.x + (W + 200) / camera.zoom;
+  var block = TUNING.terrain.pixelBlockSize;
 
-  for (var i = 0; i < kp.length - 1; i++) {
-    var a = kp[i], b = kp[i + 1];
-    if (b.x < worldLeft || a.x > worldRight) continue;
+  var startX = Math.floor(worldLeft / block) * block;
+  var endX = Math.ceil(worldRight / block) * block;
 
-    var palette = islands[a.islandIndex % islands.length];
-    var color = (a.hillIndex % 2 === 0) ? palette.fill : palette.stripe;
-
-    targetCtx.fillStyle = color;
-    targetCtx.beginPath();
-    var startS = worldToScreen(a.x, a.y + 4000);
-    targetCtx.moveTo(startS.x, startS.y);
-
-    var steps = Math.max(2, Math.ceil((b.x - a.x) / TUNING.terrain.sampleStep));
-    for (var s = 0; s <= steps; s++) {
-      var x = lerp(a.x, b.x, s / steps);
-      var y = terrain.y(x);
-      var sc = worldToScreen(x, y);
-      targetCtx.lineTo(sc.x, sc.y);
-    }
-    var endS = worldToScreen(b.x, b.y + 4000);
-    targetCtx.lineTo(endS.x, endS.y);
-    targetCtx.closePath();
-    targetCtx.fill();
-  }
-
-  // outline stroke along the surface for readability
-  targetCtx.strokeStyle = ASSETS.terrain.outline;
-  targetCtx.lineWidth = 3;
   targetCtx.beginPath();
-  var firstPt = true;
-  for (var x2 = worldLeft; x2 <= worldRight; x2 += TUNING.terrain.sampleStep) {
-    var y2 = terrain.y(x2);
-    var sc2 = worldToScreen(x2, y2);
-    if (firstPt) { targetCtx.moveTo(sc2.x, sc2.y); firstPt = false; } else targetCtx.lineTo(sc2.x, sc2.y);
+  var prevBlockY = null;
+  for (var wx = startX; wx < endX; wx += block) {
+    var sampleX = wx + block * 0.5;
+    var worldY = terrain.y(sampleX);
+    var blockY = Math.round(worldY / block) * block;
+
+    var seg = kp[terrain.segmentIndexAt(sampleX)];
+    var palette = islands[seg.islandIndex % islands.length];
+    var color = (seg.hillIndex % 2 === 0) ? palette.fill : palette.stripe;
+
+    var topLeft = worldToScreen(wx, blockY);
+    var botRight = worldToScreen(wx + block, blockY + 6000);
+
+    // floor/ceil with 1px overlap so neighboring columns never leave a
+    // hairline seam between them at fractional screen coordinates
+    var rx = Math.floor(topLeft.x);
+    var ry = Math.floor(topLeft.y);
+    var rw = Math.ceil(botRight.x) - rx + 1;
+    var rh = Math.ceil(botRight.y) - ry;
+    targetCtx.fillStyle = color;
+    targetCtx.fillRect(rx, ry, rw, rh);
+
+    // stepped outline: a flat tread across this column, a vertical riser
+    // wherever the height changed from the column before it
+    if (prevBlockY === null) {
+      targetCtx.moveTo(topLeft.x, topLeft.y);
+    } else if (blockY !== prevBlockY) {
+      targetCtx.lineTo(topLeft.x, topLeft.y);
+    }
+    var topRight = worldToScreen(wx + block, blockY);
+    targetCtx.lineTo(topRight.x, topRight.y);
+    prevBlockY = blockY;
   }
+
+  targetCtx.strokeStyle = ASSETS.terrain.outline;
+  targetCtx.lineWidth = 2;
   targetCtx.stroke();
 }
 
@@ -865,16 +865,7 @@ function render() {
   drawSky();
   drawClouds();
   drawBackgroundHills();
-
-  terrainBufCtx.clearRect(0, 0, terrainBuf.width, terrainBuf.height);
-  terrainBufCtx.save();
-  terrainBufCtx.scale(1 / TERRAIN_PIXEL_SIZE, 1 / TERRAIN_PIXEL_SIZE);
-  drawTerrain(terrainBufCtx);
-  terrainBufCtx.restore();
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(terrainBuf, 0, 0, terrainBuf.width, terrainBuf.height, 0, 0, W, H);
-  ctx.imageSmoothingEnabled = true;
-
+  drawTerrain(ctx);
   pickups.draw(ctx);
   drawPlayer();
   drawHUD();
