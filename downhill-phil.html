@@ -136,6 +136,11 @@ var TUNING = {
     max: 10
   },
 
+  airtime: {
+    scorePerSecond: 5,        // score awarded per full second of continuous air time
+    pulseDuration: 0.25       // s, how long the HUD score "punch" animation lasts per tick
+  },
+
   // Battery: the bike's real fuel gauge. Draining only happens while dive
   // is actively held (that's the "press" the pump mechanic runs on) --
   // coasting costs nothing. Only battery pickups refill it; running dry
@@ -410,6 +415,7 @@ var ASSETS = {
     comboColor: "#ff5d5d",
     perfectColor: "#ffffff",
     bailColor: "#ff3030",
+    airtimeColor: "#c9a6ff",
     titleColor: "#ffffff",
     sectionColor: "#ffffff",
     timeLowColor: "#ff5d5d"
@@ -519,6 +525,8 @@ var player = {
   distance: 0,
   bailTimer: 0,   // >0 while tumbling from a bad crash, ignores dive input
   bailSpin: 0,    // accumulated visual tumble rotation while bailing
+  airTime: 0,     // s, continuous time airborne this flight (resets on landing)
+  airTicks: 0,    // whole seconds of airTime already scored this flight
 
   reset: function () {
     this.x = 0;
@@ -533,6 +541,8 @@ var player = {
     this.angle = 0;
     this.bailTimer = 0;
     this.bailSpin = 0;
+    this.airTime = 0;
+    this.airTicks = 0;
   },
 
   // Unified physics step, modeled on the reference implementations
@@ -583,6 +593,13 @@ var player = {
       this.state = "AIRBORNE";
       this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
       this.bailTimer = 0; // a real launch off a crest ends the tumble
+
+      this.airTime += dt;
+      var wholeSeconds = Math.floor(this.airTime);
+      if (wholeSeconds > this.airTicks) {
+        this.airTicks = wholeSeconds;
+        game.onAirtimeTick();
+      }
     }
 
     this.angle = Math.atan2(this.vy, this.vx);
@@ -608,6 +625,8 @@ var player = {
   },
 
   land: function (groundY) {
+    this.airTime = 0;
+    this.airTicks = 0;
     this.y = groundY;
     var slope = terrain.slope(this.x);
     var invNorm = 1 / Math.sqrt(1 + slope * slope);
@@ -991,10 +1010,15 @@ function drawHUD() {
   ctx.shadowColor = hud.shadow;
   ctx.shadowBlur = 4;
 
-  // score
+  // score -- punches up briefly on each airtime tick for a satisfying feel
   ctx.fillStyle = hud.text;
   ctx.font = "bold 26px sans-serif";
-  ctx.fillText("Score: " + game.score, 16, 14);
+  var scorePulseScale = 1 + 0.35 * game.scorePulse;
+  ctx.save();
+  ctx.translate(16, 14);
+  ctx.scale(scorePulseScale, scorePulseScale);
+  ctx.fillText("Score: " + game.score, 0, 0);
+  ctx.restore();
 
   // combo
   if (player.combo > 1) {
@@ -1135,6 +1159,7 @@ var game = {
   popups: [],
   sectionBanner: null, // {text, life, maxLife} -- one big centered "road sign" at a time
   gameOverCooldown: 0,
+  scorePulse: 0, // 0-1, decaying "punch" applied to the HUD score text on each airtime tick
 
   start: function () {
     terrain.init();
@@ -1152,6 +1177,7 @@ var game = {
     this.sectionIndex = 0;
     this.failReason = "";
     this.popups = [];
+    this.scorePulse = 0;
     this.state = "PLAYING";
     this.showSectionBanner(TUNING.journey.sections[0].name);
   },
@@ -1164,6 +1190,12 @@ var game = {
 
   showSectionBanner: function (text) {
     this.sectionBanner = { text: text, life: 2.5, maxLife: 2.5 };
+  },
+
+  onAirtimeTick: function () {
+    this.addScore(TUNING.airtime.scorePerSecond);
+    this.spawnPopup("+" + TUNING.airtime.scorePerSecond, player.x, player.y - 40, ASSETS.hud.airtimeColor);
+    this.scorePulse = 1;
   },
 
   update: function (dt) {
@@ -1224,6 +1256,10 @@ var game = {
     if (this.sectionBanner) {
       this.sectionBanner.life -= dt;
       if (this.sectionBanner.life <= 0) this.sectionBanner = null;
+    }
+
+    if (this.scorePulse > 0) {
+      this.scorePulse = Math.max(0, this.scorePulse - dt / TUNING.airtime.pulseDuration);
     }
   }
 };
