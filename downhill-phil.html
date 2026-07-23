@@ -91,9 +91,9 @@ var TUNING = {
 
   terrain: {
     baseline: 0,              // world Y of the "flat" reference line
-    minWidth: 286,            // narrowest hill half-span-ish segment width (+30% for Phil's bigger sprite)
+    minWidth: 420,            // narrowest hill half-span-ish segment width (roomy relative to Phil's sprite)
     maxWidth: 460,            // widest segment width at max difficulty
-    minAmp: 78,               // smallest hill amplitude (+30% for Phil's bigger sprite)
+    minAmp: 215,              // smallest hill amplitude (roomy relative to Phil's sprite)
     maxAmp: 240,              // largest hill amplitude at max difficulty
     hillsPerIsland: 6,        // every N hills = new island color palette
     sampleStep: 10            // px between rendered terrain samples
@@ -157,7 +157,7 @@ var ASSETS = {
     rollCycle: [0, 1, 2, 3], // indices into `frames`, in pedal-cycle order
     airCoastFrame: 4,
     airDiveFrame: 5,
-    displaySize: 72, // on-screen width/height in world px at zoom 1
+    displaySize: 58, // on-screen width/height in world px at zoom 1
     rollCyclesPerSecondAtRef: 3, // pedal cycle rate at rollSpeedRef
     rollSpeedRef: 900, // px/s
 
