@@ -153,10 +153,13 @@ var TUNING = {
   },
 
   airtime: {
-    tickInterval: 0.3,        // s between ticks of the in-flight counter -- rapid-fire "tick tick tick"
-    scorePerTick: 2,          // pending score banked per tick, resolved on landing (not added immediately)
-    pulseDuration: 0.25,      // s, how long the HUD score "punch" animation lasts per tick
-    resolveDuration: 1.0      // s, how long the landing resolution (doubled/crossed-out/banked) stays on screen
+    tickInterval: 0.1,        // s between ticks -- fast, immediate-feeling ascent right off a launch
+    scorePerTick: 1,          // pending score banked per tick, resolved on landing (not added immediately)
+    pulseDuration: 0.16,      // s, how long the HUD score "punch" animation lasts per tick
+    resolveDuration: 1.0,     // s, how long the landing resolution (doubled/crossed-out/banked) stays on screen
+    tickPitchStart: 520,      // Hz, tone frequency for the first tick of a flight
+    tickPitchStep: 22,        // Hz added per successive tick, capped at tickPitchMax
+    tickPitchMax: 1300
   },
 
   // Battery: the bike's real fuel gauge. Draining only happens while dive
@@ -178,7 +181,7 @@ var TUNING = {
     coinScore: 10,
     boostScore: 5,
     boostAmount: 480,
-    weights: { coin: 66, boost: 18, battery: 16 }
+    weights: { coin: 66, boost: 18, battery: 8 } // battery halved (50% rarer) -- refills matter more when scarce
   },
 
   // motion streaks trailing the player -- purely cosmetic, scales the
@@ -442,43 +445,77 @@ var ASSETS = {
 
   pickups: {
     coin: {
-      color: "#ffd347", ring: "#c98f00",
-      draw: function (ctx, x, y, t) {
-        var bob = Math.sin(t * 4) * 4;
+      color: "#ffd347", ring: "#c98f00", glow: "#fff4b0",
+      draw: function (ctx, x, y, t, scale) {
+        scale = scale || 1;
+        var bob = Math.sin(t * 4) * 4 * scale;
+        var cx = x, cy = y + bob;
+        var spin = Math.abs(Math.cos(t * 3.4));
+        var rx = Math.max(3, 14 * scale * spin), ry = 14 * scale;
+        drawPickupSparkle(ctx, cx, cy, t, 22 * scale, ASSETS.pickups.coin.glow);
         ctx.save();
-        ctx.translate(x, y + bob);
+        ctx.shadowColor = ASSETS.pickups.coin.glow;
+        ctx.shadowBlur = 8 + 8 * spin;
         ctx.fillStyle = ASSETS.pickups.coin.color;
         ctx.strokeStyle = ASSETS.pickups.coin.ring;
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.arc(0, 0, 14, 0, Math.PI * 2);
+        ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+        // a bright spin-highlight sliver, brightest edge-on like a real coin flip
+        ctx.globalAlpha = 1 - spin;
+        ctx.fillStyle = ASSETS.pickups.coin.glow;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, Math.max(1.5, rx * 0.4), ry * 0.85, 0, 0, Math.PI * 2);
+        ctx.fill();
         ctx.restore();
       }
     },
     boost: {
-      color: "#ff8a3d", ring: "#b5350a",
-      draw: function (ctx, x, y, t) {
-        var bob = Math.sin(t * 5) * 4;
+      color: "#ff8a3d", ring: "#b5350a", glow: "#ffd7a8",
+      draw: function (ctx, x, y, t, scale) {
+        scale = scale || 1;
+        var bob = Math.sin(t * 5) * 4 * scale;
+        var cx = x, cy = y + bob;
+        var spin = Math.abs(Math.cos(t * 5.2));
+        var rx = Math.max(3, 16 * scale * spin), ry = 16 * scale;
+        drawPickupSparkle(ctx, cx, cy, t, 24 * scale, ASSETS.pickups.boost.glow);
         ctx.save();
-        ctx.translate(x, y + bob);
+        ctx.shadowColor = ASSETS.pickups.boost.glow;
+        ctx.shadowBlur = 10 + 8 * spin;
         ctx.fillStyle = ASSETS.pickups.boost.color;
         ctx.strokeStyle = ASSETS.pickups.boost.ring;
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.arc(0, 0, 16, 0, Math.PI * 2);
+        ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
         ctx.fill();
+        ctx.stroke();
+        // forward-swept speed chevron instead of a plain coin highlight
+        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = ASSETS.pickups.boost.glow;
+        ctx.lineWidth = 2.5 * scale;
+        ctx.beginPath();
+        ctx.moveTo(cx - 6 * scale, cy - 6 * scale);
+        ctx.lineTo(cx + 2 * scale, cy);
+        ctx.lineTo(cx - 6 * scale, cy + 6 * scale);
         ctx.stroke();
         ctx.restore();
       }
     },
     battery: {
-      color: "#7ee8ff", ring: "#1a8fae", bolt: "#ffffff",
-      draw: function (ctx, x, y, t) {
-        var bob = Math.sin(t * 3.5) * 4;
+      color: "#7ee8ff", ring: "#1a8fae", bolt: "#ffffff", glow: "#bff3ff",
+      draw: function (ctx, x, y, t, scale) {
+        scale = scale || 1;
+        var bob = Math.sin(t * 3.5) * 4 * scale;
+        var cx = x, cy = y + bob;
+        var pulse = 0.6 + 0.4 * Math.sin(t * 3);
+        drawPickupSparkle(ctx, cx, cy, t, 24 * scale, ASSETS.pickups.battery.glow);
         ctx.save();
-        ctx.translate(x, y + bob);
+        ctx.translate(cx, cy);
+        ctx.scale(scale, scale);
+        ctx.shadowColor = ASSETS.pickups.battery.glow;
+        ctx.shadowBlur = 10 + 6 * pulse;
         ctx.fillStyle = ASSETS.pickups.battery.color;
         ctx.strokeStyle = ASSETS.pickups.battery.ring;
         ctx.lineWidth = 3;
@@ -861,6 +898,27 @@ var player = {
   }
 };
 
+// Tiny orbiting twinkle dots shared by every pickup type -- cheap way to
+// make them read as "intensely interesting" collectibles rather than a
+// flat sat-on-the-ground circle.
+function drawPickupSparkle(ctx, x, y, t, radius, color) {
+  var count = 3;
+  for (var i = 0; i < count; i++) {
+    var phase = t * 2.2 + i * (Math.PI * 2 / count);
+    var twinkle = 0.35 + 0.65 * Math.max(0, Math.sin(t * 5 + i * 2.1));
+    if (twinkle < 0.08) continue;
+    var sx = x + Math.cos(phase) * radius;
+    var sy = y + Math.sin(phase) * radius * 0.55;
+    ctx.save();
+    ctx.globalAlpha = twinkle;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 1.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
 // ===========================================================================
 // 5. Pickups — spawner, collision, effects
 // ===========================================================================
@@ -883,17 +941,40 @@ var pickups = {
     if (Math.random() > TUNING.pickups.spawnChancePerHill) return;
     var type = this.pickWeightedType();
     var wasPeak = newKp.y > prevKp.y; // descending after prev => prev was a local high point
-    var placeArc = wasPeak && Math.random() < 0.5;
 
-    var x, y;
-    if (placeArc) {
-      x = prevKp.x + (newKp.x - prevKp.x) * randRange(0.25, 0.55);
-      y = prevKp.y - TUNING.pickups.arcHeight;
-    } else {
-      x = lerp(prevKp.x, newKp.x, randRange(0.3, 0.7));
-      y = terrain.y(x) - 30;
+    if (type === "battery") {
+      // the battery is a single, more significant pickup -- never split
+      // into a group, always floated well clear of the ground
+      var bx, by;
+      if (wasPeak) {
+        bx = lerp(prevKp.x, newKp.x, 0.4);
+        by = prevKp.y - TUNING.pickups.arcHeight;
+      } else {
+        bx = lerp(prevKp.x, newKp.x, randRange(0.3, 0.7));
+        by = terrain.y(bx) - 50;
+      }
+      this.list.push({ type: type, x: bx, y: by, collected: false, t: Math.random() * 10, small: false });
+      return;
     }
-    this.list.push({ type: type, x: x, y: y, collected: false, t: Math.random() * 10 });
+
+    if (wasPeak) {
+      // coin/boost ride a little rainbow of 3 smaller pickups off the jump
+      // -- collected mid-air on the way down, ready for the player coming
+      // off the ramp, instead of one item sitting flat on the ground
+      var count = 3;
+      for (var i = 0; i < count; i++) {
+        var tRel = i / (count - 1); // 0, 0.5, 1
+        var tSeg = lerp(0.2, 0.62, tRel);
+        var x = lerp(prevKp.x, newKp.x, tSeg);
+        var rainbow = 0.55 + 0.45 * Math.sin(Math.PI * tRel); // 0.55 at the ends, 1.0 in the middle
+        var y = prevKp.y - TUNING.pickups.arcHeight * rainbow;
+        this.list.push({ type: type, x: x, y: y, collected: false, t: Math.random() * 10, small: true });
+      }
+    } else {
+      var gx = lerp(prevKp.x, newKp.x, randRange(0.3, 0.7));
+      var gy = terrain.y(gx) - 50;
+      this.list.push({ type: type, x: gx, y: gy, collected: false, t: Math.random() * 10, small: false });
+    }
   },
 
   update: function (dt) {
@@ -941,7 +1022,7 @@ var pickups = {
       var p = this.list[i];
       if (p.collected) continue;
       var s = worldToScreen(p.x, p.y);
-      ASSETS.pickups[p.type].draw(ctx, s.x, s.y, p.t);
+      ASSETS.pickups[p.type].draw(ctx, s.x, s.y, p.t, p.small ? 0.65 : 1);
     }
   }
 };
@@ -1508,9 +1589,46 @@ function drawHUD() {
   ctx.restore();
 }
 
-// Fixed top-left mute toggle -- always tappable, in every game state.
 // Global sound toggle -- gates any sound effects (e.g. the airtime tick)
 var soundMuted = false;
+
+// Lazily-created AudioContext for tiny synthesized sound effects (no audio
+// file needed). Created/resumed from game.start(), which itself only ever
+// runs inside a pointerdown/keydown handler, so this satisfies the
+// browser's autoplay-requires-a-user-gesture rule.
+var audioCtx = null;
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    var Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    audioCtx = new Ctor();
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+// A short, bright blip whose pitch climbs with `index` (the flight's tick
+// count so far) -- an ascending scale is what makes a rapid-fire counter
+// feel satisfying rather than just noisy.
+function playTickSound(index) {
+  if (soundMuted) return;
+  var ctx2 = ensureAudioCtx();
+  if (!ctx2) return;
+  var a = TUNING.airtime;
+  var freq = Math.min(a.tickPitchStart + index * a.tickPitchStep, a.tickPitchMax);
+  var now = ctx2.currentTime;
+  var osc = ctx2.createOscillator();
+  var gain = ctx2.createGain();
+  osc.type = "square";
+  osc.frequency.setValueAtTime(freq, now);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.16, now + 0.004);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+  osc.connect(gain);
+  gain.connect(ctx2.destination);
+  osc.start(now);
+  osc.stop(now + 0.08);
+}
 
 // Bottom-left corner -- always clear of the score/battery HUD panels in
 // every game state, so it never has to push other UI around.
@@ -1937,6 +2055,7 @@ var game = {
     this.scoreRevealTimer = 0;
     this.state = "PLAYING";
     this.showSectionBanner(TUNING.journey.sections[0].name);
+    ensureAudioCtx();
   },
 
   addScore: function (n) { this.score += n; },
@@ -1956,6 +2075,7 @@ var game = {
     // out in full depending on how the landing goes.
     player.airTimeScore += TUNING.airtime.scorePerTick;
     player.airCounterPulse = 1;
+    playTickSound(player.airTicks - 1);
   },
 
   spawnAirResolve: function (type, amount, awarded, x, y) {
