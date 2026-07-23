@@ -161,6 +161,18 @@ var ASSETS = {
     rollCyclesPerSecondAtRef: 3, // pedal cycle rate at rollSpeedRef
     rollSpeedRef: 900, // px/s
 
+    // Where the wheels touch ground, as a fraction of the frame (measured
+    // from the art: consistent across all 6 poses at x~0.48-0.53,
+    // y~0.985-0.997 -- i.e. almost the bottom edge). Physics tracks a
+    // single ground-contact point and rotates the sprite around it; drawing
+    // centered on that point (the old 0.5/0.5 default) put the pivot at the
+    // torso instead of the wheels, so the wheels swung off the terrain
+    // curve as slope changed instead of staying planted on it -- that
+    // mismatch, exaggerated by the sprite being much bigger than the old
+    // placeholder circle, is what read as "choppy" motion.
+    anchorX: 0.5,
+    anchorY: 0.97,
+
     // Slicing frames straight out of the sheet with drawImage every render
     // let the browser's smoothing sample a sliver of the *next* frame at
     // each cell boundary (visible as thin seam lines, worst near the head
@@ -220,8 +232,9 @@ var ASSETS = {
       ctx.translate(x, y);
       ctx.rotate(angle);
       ctx.imageSmoothingEnabled = true; // safe now -- the source frame has no neighbors to bleed in
-      var half = this.displaySize / 2;
-      ctx.drawImage(this.frames[idx], -half, -half, this.displaySize, this.displaySize);
+      var ox = -this.displaySize * this.anchorX;
+      var oy = -this.displaySize * this.anchorY;
+      ctx.drawImage(this.frames[idx], ox, oy, this.displaySize, this.displaySize);
       ctx.restore();
     }
   },
