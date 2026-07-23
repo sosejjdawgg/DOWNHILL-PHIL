@@ -489,19 +489,49 @@ var ASSETS = {
 
   sounds: { perfect: null, land: null, pickup: null }, // stub hooks, no audio yet
 
+  // Retro synthwave movie-poster look for the title/menu screen: sunset
+  // gradient sky, a striped sun on the horizon, a receding grid, and a
+  // chrome/neon gradient title with a pulsing start button.
+  title: {
+    skyTop: "#1b0a3d",
+    skyMid: "#7c2565",
+    skyLow: "#ff7a45",
+    sunTop: "#ffe66d",
+    sunBottom: "#ff3d68",
+    rayColor: "rgba(255,220,150,0.10)",
+    groundColor: "#170826",
+    gridColor: "rgba(255,110,190,0.55)",
+    titleGradTop: "#eafcff",
+    titleGradBottom: "#6fd8ff",
+    titleStroke: "#ff3da6",
+    tagline: "#ffe66d",
+    routeColor: "rgba(255,255,255,0.85)",
+    buttonBg: "#ff3da6",
+    buttonBgAlt: "#ffb84d",
+    buttonText: "#1a0033",
+    hintColor: "rgba(255,255,255,0.75)"
+  },
+
   hud: {
-    text: "#1c1c1c",
-    shadow: "rgba(0,0,0,0.35)",
-    batteryBarBg: "rgba(0,0,0,0.28)",
+    text: "#ffffff",
+    shadow: "rgba(0,0,0,0.4)",
+    panelBg: "rgba(20,10,40,0.42)",
+    panelBorder: "rgba(255,255,255,0.16)",
+    speedColor: "rgba(255,255,255,0.8)",
+    batteryBarBg: "rgba(0,0,0,0.3)",
     batteryBarFill: "#7ee8ff",
+    batteryBarFillAlt: "#ff3da6",
     batteryBarLow: "#ff5d5d",
-    comboColor: "#ff5d5d",
+    comboColor: "#ffb84d",
     perfectColor: "#ffffff",
     bailColor: "#ff3030",
     airtimeColor: "#c9a6ff",
     titleColor: "#ffffff",
-    sectionColor: "#ffffff",
-    timeLowColor: "#ff5d5d"
+    sectionColor: "#ffe66d",
+    timeLowColor: "#ff5d5d",
+    bannerBg1: "rgba(124,37,101,0.55)",
+    bannerBg2: "rgba(255,61,166,0.35)",
+    bannerBorder: "rgba(255,230,109,0.8)"
   }
 };
 
@@ -1150,10 +1180,38 @@ function formatTime(seconds) {
   return m + ":" + (s < 10 ? "0" : "") + s;
 }
 
+// ---------------------------------------------------------------------------
+// high score -- persisted locally so it survives a page reload
+// ---------------------------------------------------------------------------
+var HIGH_SCORE_KEY = "downhillPhilHighScore";
+function getHighScore() {
+  var v = 0;
+  try { v = parseInt(localStorage.getItem(HIGH_SCORE_KEY), 10); } catch (e) {}
+  return isNaN(v) ? 0 : v;
+}
+function saveHighScoreIfBetter(score) {
+  var best = getHighScore();
+  if (score > best) {
+    try { localStorage.setItem(HIGH_SCORE_KEY, String(score)); } catch (e) {}
+    return true;
+  }
+  return false;
+}
+
 function drawHUD() {
   var hud = ASSETS.hud;
   ctx.save();
   ctx.textBaseline = "top";
+
+  // top-left status panel: score, combo, speed, section
+  ctx.fillStyle = hud.panelBg;
+  roundRect(ctx, 6, 6, 226, 108, 14);
+  ctx.fill();
+  ctx.strokeStyle = hud.panelBorder;
+  ctx.lineWidth = 1;
+  roundRect(ctx, 6, 6, 226, 108, 14);
+  ctx.stroke();
+
   ctx.shadowColor = hud.shadow;
   ctx.shadowBlur = 4;
 
@@ -1175,7 +1233,7 @@ function drawHUD() {
   }
 
   // speed readout
-  ctx.fillStyle = hud.text;
+  ctx.fillStyle = hud.speedColor;
   ctx.font = "16px sans-serif";
   ctx.fillText(Math.round(player.speed) + " px/s", 16, 74);
 
@@ -1185,15 +1243,46 @@ function drawHUD() {
   ctx.font = "bold 14px sans-serif";
   ctx.fillText(sectionName, 16, 96);
 
-  // battery bar (top-right)
-  var barW = Math.min(260, W * 0.4), barH = 16;
-  var barX = W - barW - 16, barY = 16;
+  // top-right panel: battery bar (with bolt icon) + mission timer
+  var barW = Math.min(220, W * 0.36), barH = 16;
+  var barX = W - barW - 34, barY = 20;
+  var panelX = barX - 14, panelW = barW + 48;
   ctx.shadowBlur = 0;
+  ctx.fillStyle = hud.panelBg;
+  roundRect(ctx, panelX, 6, panelW, 68, 14);
+  ctx.fill();
+  ctx.strokeStyle = hud.panelBorder;
+  roundRect(ctx, panelX, 6, panelW, 68, 14);
+  ctx.stroke();
+
+  // bolt icon to the left of the battery bar
+  ctx.save();
+  ctx.translate(barX - 10, barY + barH / 2);
+  ctx.fillStyle = game.battery / TUNING.battery.max < 0.2 ? hud.batteryBarLow : hud.batteryBarFill;
+  ctx.beginPath();
+  ctx.moveTo(2, -8);
+  ctx.lineTo(-6, 1);
+  ctx.lineTo(-1, 1);
+  ctx.lineTo(-2, 8);
+  ctx.lineTo(6, -1);
+  ctx.lineTo(1, -1);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
   ctx.fillStyle = hud.batteryBarBg;
   roundRect(ctx, barX, barY, barW, barH, 8);
   ctx.fill();
   var frac = clamp(game.battery / TUNING.battery.max, 0, 1);
-  ctx.fillStyle = frac < 0.2 ? hud.batteryBarLow : hud.batteryBarFill;
+  var battGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+  if (frac < 0.2) {
+    battGrad.addColorStop(0, hud.batteryBarLow);
+    battGrad.addColorStop(1, hud.batteryBarLow);
+  } else {
+    battGrad.addColorStop(0, hud.batteryBarFillAlt);
+    battGrad.addColorStop(1, hud.batteryBarFill);
+  }
+  ctx.fillStyle = battGrad;
   roundRect(ctx, barX, barY, barW * frac, barH, 8);
   ctx.fill();
 
@@ -1203,7 +1292,7 @@ function drawHUD() {
   ctx.textAlign = "right";
   ctx.font = "bold 18px sans-serif";
   ctx.fillStyle = game.missionTimer < 15 ? hud.timeLowColor : hud.text;
-  ctx.fillText(formatTime(game.missionTimer), W - 16, barY + barH + 8);
+  ctx.fillText(formatTime(game.missionTimer), barX + barW, barY + barH + 8);
   ctx.textAlign = "left";
 
   // popups
@@ -1224,11 +1313,20 @@ function drawHUD() {
     var fadeIn = clamp((b.maxLife - b.life) / 0.3, 0, 1);
     var fadeOut = clamp(b.life / 0.5, 0, 1);
     ctx.globalAlpha = Math.min(fadeIn, fadeOut);
-    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    var bannerGrad = ctx.createLinearGradient(0, H * 0.3, 0, H * 0.3 + 90);
+    bannerGrad.addColorStop(0, hud.bannerBg1);
+    bannerGrad.addColorStop(1, hud.bannerBg2);
+    ctx.fillStyle = bannerGrad;
     ctx.fillRect(0, H * 0.3, W, 90);
-    ctx.fillStyle = hud.sectionColor;
+    ctx.fillStyle = hud.bannerBorder;
+    ctx.fillRect(0, H * 0.3, W, 2);
+    ctx.fillRect(0, H * 0.3 + 88, W, 2);
+    ctx.shadowColor = "rgba(255,61,166,0.8)";
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = hud.text;
     ctx.font = "bold 40px sans-serif";
     ctx.fillText(b.text, W / 2, H * 0.3 + 20);
+    ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
   }
   ctx.textAlign = "left";
@@ -1252,15 +1350,150 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 function drawTitleScreen() {
-  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  var t = ASSETS.title;
+  var now = performance.now();
+
+  // full-bleed synthwave sunset sky
+  var sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, t.skyTop);
+  sky.addColorStop(0.55, t.skyMid);
+  sky.addColorStop(1, t.skyLow);
+  ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H);
+
+  var horizonY = H * 0.64;
+  var sunCx = W / 2, sunCy = horizonY - Math.min(W, H) * 0.06;
+  var sunR = Math.min(W, H) * 0.26;
+
+  // slow-rotating light rays fanning out from behind the sun
+  ctx.save();
+  ctx.translate(sunCx, sunCy);
+  ctx.rotate(now / 30000);
+  var rayCount = 14;
+  for (var i = 0; i < rayCount; i++) {
+    ctx.save();
+    ctx.rotate((i / rayCount) * Math.PI * 2);
+    ctx.fillStyle = t.rayColor;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, sunR * 3, -0.045, 0.045);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+
+  // striped retro sun, clipped so it never pokes below the horizon
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, horizonY);
+  ctx.clip();
+  var sunGrad = ctx.createLinearGradient(0, sunCy - sunR, 0, sunCy + sunR);
+  sunGrad.addColorStop(0, t.sunTop);
+  sunGrad.addColorStop(1, t.sunBottom);
+  ctx.fillStyle = sunGrad;
+  ctx.beginPath();
+  ctx.arc(sunCx, sunCy, sunR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = t.skyMid; // cut horizontal gaps into the sun, poster-style
+  ctx.globalAlpha = 0.85;
+  for (var j = 0; j < 5; j++) {
+    var stripeY = sunCy + sunR * (0.12 + j * 0.15);
+    ctx.fillRect(sunCx - sunR, stripeY, sunR * 2, sunR * 0.05);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // ground plane + perspective grid receding to the horizon
+  ctx.fillStyle = t.groundColor;
+  ctx.fillRect(0, horizonY, W, H - horizonY);
+  ctx.strokeStyle = t.gridColor;
+  ctx.lineWidth = 1.5;
+  var vanishX = W / 2;
+  for (var gx = -9; gx <= 9; gx++) {
+    ctx.beginPath();
+    ctx.moveTo(vanishX, horizonY);
+    ctx.lineTo(vanishX + gx * W * 0.65, H);
+    ctx.stroke();
+  }
+  for (var gy = 1; gy <= 7; gy++) {
+    var frac = gy / 7;
+    var ly = horizonY + (H - horizonY) * (frac * frac);
+    ctx.beginPath();
+    ctx.moveTo(0, ly);
+    ctx.lineTo(W, ly);
+    ctx.stroke();
+  }
+
+  // hero shot: Phil coasting along the horizon line
+  ASSETS.player.draw(ctx, W / 2, horizonY + 6, -0.12, "GROUNDED", 900);
+
+  // title -- chrome/neon gradient fill over a glowing magenta outline,
+  // with a gentle breathing pulse
+  var pulse = 1 + 0.025 * Math.sin(now / 450);
+  var titleSize = clamp(W * 0.11, 36, 96);
+  ctx.save();
+  ctx.translate(W / 2, H * 0.24);
+  ctx.scale(pulse, pulse);
   ctx.textAlign = "center";
-  ctx.fillStyle = ASSETS.hud.titleColor;
-  ctx.font = "bold 56px sans-serif";
-  ctx.fillText("DOWNHILL PHIL", W / 2, H / 2 - 60);
-  ctx.font = "28px sans-serif";
-  ctx.fillText("tap, click, or press space to dive", W / 2, H / 2 + 10);
+  ctx.textBaseline = "middle";
+  ctx.font = "900 " + titleSize + "px sans-serif";
+  var titleGrad = ctx.createLinearGradient(0, -titleSize * 0.6, 0, titleSize * 0.6);
+  titleGrad.addColorStop(0, t.titleGradTop);
+  titleGrad.addColorStop(1, t.titleGradBottom);
+  ctx.shadowColor = t.titleStroke;
+  ctx.shadowBlur = titleSize * 0.35;
+  ctx.lineWidth = titleSize * 0.05;
+  ctx.strokeStyle = t.titleStroke;
+  ctx.strokeText("DOWNHILL PHIL", 0, 0);
+  ctx.fillStyle = titleGrad;
+  ctx.fillText("DOWNHILL PHIL", 0, 0);
+  ctx.restore();
+
+  ctx.shadowBlur = 0;
+  ctx.textAlign = "center";
+  ctx.fillStyle = t.tagline;
+  ctx.font = "bold " + clamp(W * 0.026, 15, 22) + "px sans-serif";
+  ctx.fillText("RACE THE BATTERY. BEAT THE CLOCK. GET HOME.", W / 2, H * 0.24 + titleSize * 0.62 + 20);
+
+  ctx.fillStyle = t.routeColor;
+  ctx.font = "bold " + clamp(W * 0.018, 12, 16) + "px sans-serif";
+  ctx.fillText("GATESHEAD  →  WASHINGTON  →  SUNDERLAND", W / 2, H * 0.24 + titleSize * 0.62 + 48);
+
+  // high score, if one exists yet
+  var best = getHighScore();
+  if (best > 0) {
+    ctx.fillStyle = t.hintColor;
+    ctx.font = "bold " + clamp(W * 0.02, 14, 18) + "px sans-serif";
+    ctx.fillText("HIGH SCORE: " + best, W / 2, H * 0.24 + titleSize * 0.62 + 78);
+  }
+
+  // pulsing start button
+  var btnPulse = 1 + 0.07 * Math.sin(now / 300);
+  var btnW = clamp(W * 0.34, 220, 340), btnH = 62;
+  ctx.save();
+  ctx.translate(W / 2, H * 0.82);
+  ctx.scale(btnPulse, btnPulse);
+  ctx.shadowColor = t.buttonBg;
+  ctx.shadowBlur = 28;
+  var btnGrad = ctx.createLinearGradient(-btnW / 2, 0, btnW / 2, 0);
+  btnGrad.addColorStop(0, t.buttonBg);
+  btnGrad.addColorStop(1, t.buttonBgAlt);
+  ctx.fillStyle = btnGrad;
+  roundRect(ctx, -btnW / 2, -btnH / 2, btnW, btnH, btnH / 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = t.buttonText;
+  ctx.font = "bold 24px sans-serif";
+  ctx.fillText("TAP TO START", 0, 2);
+  ctx.restore();
+
+  ctx.fillStyle = t.hintColor;
+  ctx.font = "15px sans-serif";
+  ctx.fillText("or press space", W / 2, H * 0.82 + btnH * 0.5 + 26);
+
   ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
 }
 
 function drawGameOverScreen() {
@@ -1273,8 +1506,12 @@ function drawGameOverScreen() {
   ctx.fillText(message, W / 2, H / 2 - 70);
   ctx.font = "bold 32px sans-serif";
   ctx.fillText("Score: " + game.score, W / 2, H / 2 - 10);
+  ctx.font = "bold 18px sans-serif";
+  ctx.fillStyle = game.isNewHighScore ? ASSETS.title.tagline : "rgba(255,255,255,0.75)";
+  ctx.fillText(game.isNewHighScore ? "NEW HIGH SCORE!" : "Best: " + getHighScore(), W / 2, H / 2 + 24);
+  ctx.fillStyle = ASSETS.hud.titleColor;
   ctx.font = "22px sans-serif";
-  ctx.fillText("tap to try again", W / 2, H / 2 + 40);
+  ctx.fillText("tap to try again", W / 2, H / 2 + 62);
   ctx.textAlign = "left";
 }
 
@@ -1287,9 +1524,13 @@ function drawWinScreen() {
   ctx.fillText("You made it home!", W / 2, H / 2 - 90);
   ctx.font = "bold 32px sans-serif";
   ctx.fillText("Score: " + game.score, W / 2, H / 2 - 30);
+  ctx.font = "bold 18px sans-serif";
+  ctx.fillStyle = game.isNewHighScore ? ASSETS.title.tagline : "rgba(255,255,255,0.75)";
+  ctx.fillText(game.isNewHighScore ? "NEW HIGH SCORE!" : "Best: " + getHighScore(), W / 2, H / 2 - 4);
+  ctx.fillStyle = ASSETS.hud.titleColor;
   ctx.font = "22px sans-serif";
-  ctx.fillText("Time left: " + formatTime(game.missionTimer), W / 2, H / 2 + 10);
-  ctx.fillText("tap to ride again", W / 2, H / 2 + 50);
+  ctx.fillText("Time left: " + formatTime(game.missionTimer), W / 2, H / 2 + 30);
+  ctx.fillText("tap to ride again", W / 2, H / 2 + 66);
   ctx.textAlign = "left";
 }
 
@@ -1309,6 +1550,7 @@ var game = {
   scorePulse: 0, // 0-1, decaying "punch" applied to the HUD score text on each airtime tick
   finishStopped: false, // FINISHING sub-phase: still gliding in (false) vs. stopped & celebrating (true)
   celebrateTimer: 0,
+  isNewHighScore: false,
 
   start: function () {
     terrain.init();
@@ -1330,6 +1572,7 @@ var game = {
     this.scorePulse = 0;
     this.finishStopped = false;
     this.celebrateTimer = 0;
+    this.isNewHighScore = false;
     this.state = "PLAYING";
     this.showSectionBanner(TUNING.journey.sections[0].name);
   },
@@ -1373,6 +1616,7 @@ var game = {
       this.state = "GAMEOVER";
       this.failReason = "BATTERY";
       this.gameOverCooldown = 0.5;
+      this.isNewHighScore = saveHighScoreIfBetter(this.score);
       this.sectionBanner = null; // don't let a fading banner clash with the end screen
       return;
     }
@@ -1383,6 +1627,7 @@ var game = {
       this.state = "GAMEOVER";
       this.failReason = "TIME";
       this.gameOverCooldown = 0.5;
+      this.isNewHighScore = saveHighScoreIfBetter(this.score);
       this.sectionBanner = null;
       return;
     }
@@ -1459,6 +1704,7 @@ var game = {
       if (this.celebrateTimer >= TUNING.finish.celebrateDuration) {
         this.state = "WIN";
         this.gameOverCooldown = 0.5;
+        this.isNewHighScore = saveHighScoreIfBetter(this.score);
       }
     }
 
