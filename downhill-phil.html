@@ -664,6 +664,12 @@ var terrain = {
         ? lerp(t.minAmp, t.maxAmp, diff) * randRange(0.5, 2.0)
         : lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
 
+      // Spread that extra depth over ~25% more distance on the way down --
+      // same drop, less steep (~20% gentler slope) instead of a sharper cliff.
+      if (dir > 0) {
+        width *= 1.25;
+      }
+
       var newX = last.x + width;
       var newY;
       if (newX >= flatStartX) {
