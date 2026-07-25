@@ -642,7 +642,6 @@ var terrain = {
       var diff = clamp(Math.max(0, last.x) / TUNING.difficulty.rampDistance, 0, 1);
 
       var width = lerp(t.minWidth, t.maxWidth, diff) * randRange(0.75, 1.25);
-      var amp = lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
 
       // The very first hill gets a longer run so the opening descent
       // reads as a proper kicker ramp -- room to build speed before the
@@ -657,6 +656,14 @@ var terrain = {
       var dir = -this.lastDir;
       this.lastDir = dir;
 
+      // Dips (troughs, dir > 0) run deeper and more varied than peaks --
+      // more room on the descent before the next climb starts, instead of
+      // landing and slamming straight into a new ramp. Peaks keep their
+      // original, gentler range.
+      var amp = dir > 0
+        ? lerp(t.minAmp, t.maxAmp, diff) * randRange(0.5, 2.0)
+        : lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
+
       var newX = last.x + width;
       var newY;
       if (newX >= flatStartX) {
@@ -667,8 +674,8 @@ var terrain = {
       } else {
         newY = clamp(
           t.baseline + dir * amp,
-          t.baseline - t.maxAmp * 1.4,
-          t.baseline + t.maxAmp * 1.4
+          t.baseline - t.maxAmp * 2.2,
+          t.baseline + t.maxAmp * 2.2
         );
       }
 
