@@ -73,6 +73,17 @@ var TUNING = {
   maxFallSpeed: 3000,         // px/s, vertical fall speed clamp
   minForwardVel: 90,          // px/s, floor on vx so the player never goes backward
 
+  // Hidden left-side touch zone: holding it while airborne rotates the
+  // velocity vector (nose up) at this rate, speed-preserving, so a bad
+  // launch angle can be corrected into a better landing. Floored so
+  // holding it can't rotate all the way into flying backward.
+  airTilt: { rate: 2.4, minAngle: -0.9 },
+
+  // Hidden left-side touch zone while grounded: purely cosmetic, no
+  // speed/physics change -- just a wheelie pose so the split still reads
+  // as "doing something" without altering the ride.
+  wheelie: { tiltAngle: 0.35 },
+
   camera: {
     leadFraction: 0.30,       // player sits 30% of the way across the screen
     easeX: 8.0,               // horizontal follow ease rate (keeps up with speed)
@@ -739,6 +750,8 @@ var player = {
   angle: 0,
   state: "GROUNDED", // GROUNDED | AIRBORNE
   diveHeld: false,
+  tiltHeld: false,     // hidden left-side touch zone, held while airborne
+  wheelieActive: false, // hidden left-side touch zone, cosmetic while grounded
   combo: 0,
   distance: 0,
   bailTimer: 0,   // >0 while tumbling from a bad crash, ignores dive input
@@ -756,6 +769,8 @@ var player = {
     this.vy = 0;
     this.state = "GROUNDED";
     this.diveHeld = false;
+    this.tiltHeld = false;
+    this.wheelieActive = false;
     this.combo = 0;
     this.distance = 0;
     this.angle = 0;
@@ -800,6 +815,17 @@ var player = {
       }
     } else {
       this.vy += TUNING.gravity * dt; // baseline gravity, grounded or not
+    }
+
+    // Hidden left-side touch zone while airborne: tip backward, rotating
+    // the velocity vector nose-up (speed preserved) so a bad launch angle
+    // can be steered into a cleaner landing.
+    if (this.tiltHeld && !wasGrounded && this.bailTimer <= 0) {
+      var curAngle = Math.atan2(this.vy, this.vx);
+      var newAngle = Math.max(TUNING.airTilt.minAngle, curAngle - TUNING.airTilt.rate * dt);
+      var tiltSpeed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+      this.vx = tiltSpeed * Math.cos(newAngle);
+      this.vy = tiltSpeed * Math.sin(newAngle);
     }
 
     this.vx = clamp(this.vx, TUNING.minForwardVel, TUNING.maxSpeed);
@@ -1349,6 +1375,9 @@ function drawPlayer() {
   } else {
     state = (player.state === "AIRBORNE" && player.diveHeld) ? "AIRBORNE_DIVE" : player.state;
     angle = player.angle;
+    if (state === "GROUNDED" && player.wheelieActive) {
+      angle -= TUNING.wheelie.tiltAngle; // nose-up pop, purely cosmetic
+    }
   }
   ASSETS.player.draw(ctx, s.x, s.y, angle, state, player.speed);
 }
@@ -2242,8 +2271,10 @@ var game = {
     if (this.state === "FINISHING") { this.updateFinishing(dt); return; }
     if (this.state !== "PLAYING") return;
 
-    player.diveHeld = input.pressed;
+    player.diveHeld = input.rightPressed;
+    player.tiltHeld = input.leftPressed;
     player.update(dt);
+    player.wheelieActive = player.state === "GROUNDED" && input.leftPressed;
 
     terrain.ensureGenerated(player.x + 4000);
     terrain.cull(camera.x - W * 2);
@@ -2252,8 +2283,9 @@ var game = {
     updateCamera(dt);
     updateSpeedStreaks(dt);
 
-    // battery only drains while actively diving -- coasting is free
-    if (input.pressed) {
+    // battery only drains while actively diving (right-side touch zone) --
+    // coasting, and the cosmetic left-side wheelie, are both free
+    if (input.rightPressed) {
       this.battery -= TUNING.battery.drainRate * dt;
       this.batteryRechargeTarget = Math.min(this.batteryRechargeTarget, this.battery);
     }
@@ -2383,21 +2415,24 @@ var game = {
 // ---------------------------------------------------------------------------
 // input
 // ---------------------------------------------------------------------------
-var input = { pressed: false };
+// Hidden left/right touch split, with no on-screen indication: the right
+// half is the original single "go fast / dive" button, the left half is a
+// second hidden button (wheelie on the ground, air-tilt while airborne).
+// activePointers tracks which zone each active touch/pointer started in,
+// so multi-touch releases clear only the zone that pointer actually held.
+var input = { leftPressed: false, rightPressed: false };
+var activePointers = {};
 
-function onPressStart() {
+function startGameIfNeeded() {
   if (game.state === "TITLE") {
     game.start();
-    return;
+    return true;
   }
   if (game.state === "GAMEOVER" || game.state === "WIN") {
     if (game.gameOverCooldown <= 0) game.start();
-    return;
+    return true;
   }
-  input.pressed = true;
-}
-function onPressEnd() {
-  input.pressed = false;
+  return false;
 }
 
 canvas.addEventListener("pointerdown", function (e) {
@@ -2408,15 +2443,36 @@ canvas.addEventListener("pointerdown", function (e) {
     soundMuted = !soundMuted;
     return;
   }
-  onPressStart();
+  if (startGameIfNeeded()) return;
+  var zone = x < W / 2 ? "left" : "right";
+  activePointers[e.pointerId] = zone;
+  if (zone === "left") input.leftPressed = true;
+  else input.rightPressed = true;
 }, { passive: false });
-window.addEventListener("pointerup", onPressEnd);
-window.addEventListener("pointercancel", onPressEnd);
+
+function releasePointerZone(e) {
+  var zone = activePointers[e.pointerId];
+  if (!zone) return;
+  delete activePointers[e.pointerId];
+  var stillHeld = false;
+  for (var id in activePointers) {
+    if (activePointers[id] === zone) { stillHeld = true; break; }
+  }
+  if (stillHeld) return;
+  if (zone === "left") input.leftPressed = false;
+  else input.rightPressed = false;
+}
+window.addEventListener("pointerup", releasePointerZone);
+window.addEventListener("pointercancel", releasePointerZone);
 window.addEventListener("keydown", function (e) {
-  if (e.code === "Space") { e.preventDefault(); onPressStart(); }
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (startGameIfNeeded()) return;
+    input.rightPressed = true;
+  }
 });
 window.addEventListener("keyup", function (e) {
-  if (e.code === "Space") { e.preventDefault(); onPressEnd(); }
+  if (e.code === "Space") { e.preventDefault(); input.rightPressed = false; }
 });
 
 // ---------------------------------------------------------------------------
