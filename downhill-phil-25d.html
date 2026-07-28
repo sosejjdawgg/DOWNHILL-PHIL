@@ -58,6 +58,7 @@ function shadeHexColor(hex, amount) {
   return "#" + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
 }
 var TERRAIN_HIGHLIGHT_CACHE = {};
+var TERRAIN_BODY_CACHE = {};
 function normalizeAngle(a) {
   while (a > Math.PI) a -= Math.PI * 2;
   while (a < -Math.PI) a += Math.PI * 2;
@@ -113,14 +114,30 @@ var TUNING = {
     easeY: 3.5,               // vertical follow ease rate while grounded (soft/floaty)
     easeYAirborne: 9.0,       // snappier vertical ease in the air so the lookahead below
                               // actually catches up before a (typically brief) flight ends
-    zoomMin: 0.16,            // 2.5D fork: zoomed out further than the original 0.22
-    zoomMax: 0.85,            // 2.5D fork: even at low speed, stay a little pulled back
+    zoomMin: 0.095,           // 2.5D fork v2: pulled back much further still (was 0.16, originally 0.22)
+    zoomMax: 0.5,             // 2.5D fork v2: further out even at low speed (was 0.85, originally 1.0)
     zoomSpeedRef: 1500,       // px/s speed at which zoom reaches zoomMin
     zoomAltRef: 500,          // px of altitude above terrain at which zoom reaches zoomMin
     zoomAirborneMin: 0.45,    // floor on the zoom-out ratio any time we're in the air at all
     easeZoom: 1.6,            // slow, soft transition -- gradual rather than snappy
     vertLookaheadTime: 0.3,   // s, how far ahead of a climb/fall the camera peeks
-    vertLookaheadMax: 320     // px, cap on that vertical peek-ahead offset
+    vertLookaheadMax: 320,    // px, cap on that vertical peek-ahead offset
+
+    // 2.5D fork v2 -- Excite Bike 3D-style tilted/elevated camera. This is a
+    // pure screen-space oblique shear+squash applied in worldToScreen, NOT a
+    // real 3D/perspective-divide projection (the physics sim is still a flat
+    // 2D height field with no z-axis) -- but sheared consistently everywhere
+    // worldToScreen is called, it reads as a camera looking down and across
+    // the slope rather than side-on. trackDepthX/Y additionally fake a track
+    // WIDTH the physics doesn't have, by drawing a second "far rail" edge
+    // offset by a fixed screen vector from every terrain tread point.
+    tilt: {
+      shearX: 0.85,           // horizontal shear per unit of (squashed-out) vertical screen offset
+      squashY: 0.62,          // vertical compression -- the "looking down at an angle" foreshortening
+      horizonYFrac: 0.30,     // screen-space fraction where the camera's reference line sits
+      trackDepthX: -34,       // px, far-rail offset (up-and-across) faking track width
+      trackDepthY: -52
+    }
   },
 
   terrain: {
@@ -1139,10 +1156,23 @@ function triggerCameraShake(magnitude, duration) {
   camera.shakeMagInitial = magnitude;
 }
 
+// 2.5D fork v2: oblique shear+squash "tilted camera" projection. dx/dy are
+// the ordinary zoomed camera-relative offsets exactly like the original
+// side-on game; tilt.shearX/squashY then fake an elevated, angled-down
+// Excite-Bike-3D-style view by shearing the vertical offset into the
+// horizontal axis and compressing it, instead of drawing it straight down.
+// Every screen position in the game (terrain, player, pickups, house,
+// particles) already goes through this one function, so the whole world
+// tilts together and gameplay logic (which never reads screen coordinates)
+// is completely unaffected.
 function worldToScreen(wx, wy) {
+  var tilt = TUNING.camera.tilt;
+  var dx = (wx - camera.x) * camera.zoom;
+  var dy = (wy - camera.y) * camera.zoom;
+  var sy = dy * tilt.squashY;
   return {
-    x: (wx - camera.x) * camera.zoom + W * TUNING.camera.leadFraction + camera.shakeOffsetX,
-    y: (wy - camera.y) * camera.zoom + H * 0.5 + camera.shakeOffsetY
+    x: dx + sy * tilt.shearX + W * TUNING.camera.leadFraction + camera.shakeOffsetX,
+    y: sy + H * tilt.horizonYFrac + camera.shakeOffsetY
   };
 }
 
@@ -1417,18 +1447,31 @@ function drawBackgroundHills() {
   }
 }
 
-// Renders the terrain as a staircase of flat-shaded rectangular columns
-// instead of a smooth curve -- genuine blocky pixel-art geometry, drawn
-// sharp at full resolution (no downsampling/blur, unlike an upscaled
-// low-res buffer). The column grid is anchored to WORLD space (not screen
-// space), so a given stretch of hill always quantizes to the same blocks
-// regardless of scroll position -- that's what keeps the steps stable
-// while scrolling instead of shimmering/crawling.
+// Renders the terrain as a staircase of blocky columns, same as the
+// original -- but now as a ribbon with two faces (a lit "tread" that
+// recedes toward a far rail via a fixed screen-space depth vector, faking
+// the track WIDTH the physics doesn't have; and a darker "body" face
+// beneath it giving the hill mass) instead of one flat fillRect. The
+// column grid is still anchored to WORLD space, so a given stretch of
+// hill always quantizes the same way regardless of scroll.
+//
+// Body/tread fills are batched into ONE polygon per contiguous run of
+// same-colored columns (a run is usually a whole hill face) rather than
+// filled one 8-world-px column at a time: once the columns are sheared
+// into non-axis-aligned parallelograms, hundreds of individually-filled
+// slivers abutting each other leave faint antialiased seams at every
+// boundary, which read as a distracting corduroy pattern across the
+// whole hillside. A single filled polygon per run has no internal edges
+// to seam.
 function drawTerrain(targetCtx) {
   var kp = terrain.keyPoints;
   var palettes = ASSETS.terrain.sectionPalettes;
-  var worldLeft = camera.x - 200 / camera.zoom;
-  var worldRight = camera.x + (W + 200) / camera.zoom;
+  var tilt = TUNING.camera.tilt;
+  // extra horizontal margin to cover how far the shear can push a tall
+  // peak/deep trough sideways before it's actually off-screen
+  var shearMargin = (Math.abs(tilt.trackDepthX) + 400 * tilt.squashY * Math.abs(tilt.shearX)) / camera.zoom;
+  var worldLeft = camera.x - (200 / camera.zoom) - shearMargin;
+  var worldRight = camera.x + (W + 200) / camera.zoom + shearMargin;
   var block = TUNING.terrain.pixelBlockSize;
 
   var startX = Math.floor(worldLeft / block) * block;
@@ -1436,15 +1479,56 @@ function drawTerrain(targetCtx) {
 
   var prevBlockY = null;
   var currentOutline = null;
-  var pathOpen = false;
+  var outlineOpen = false;
   function flushOutline() {
-    if (pathOpen) {
+    if (outlineOpen) {
       targetCtx.strokeStyle = currentOutline;
       targetCtx.lineWidth = 2;
       targetCtx.stroke();
-      pathOpen = false;
+      outlineOpen = false;
     }
   }
+
+  var runNear = [], runFar = [];
+  var runColor = null;
+  function flushRun() {
+    var n = runNear.length;
+    if (n < 2) { runNear = []; runFar = []; return; }
+    var bodyColor = TERRAIN_BODY_CACHE[runColor] || (TERRAIN_BODY_CACHE[runColor] = shadeHexColor(runColor, -20));
+    var hiColor = TERRAIN_HIGHLIGHT_CACHE[runColor] || (TERRAIN_HIGHLIGHT_CACHE[runColor] = shadeHexColor(runColor, 30));
+    var i;
+    var bottomY = Math.max(runNear[0].y, runNear[n - 1].y, runFar[0].y, runFar[n - 1].y) + 2000;
+
+    // body: trace the near/top profile (the real staircase), then drop
+    // straight down in screen space and close along a flat floor
+    targetCtx.fillStyle = bodyColor;
+    targetCtx.beginPath();
+    targetCtx.moveTo(runNear[0].x, runNear[0].y);
+    for (i = 1; i < n; i++) targetCtx.lineTo(runNear[i].x, runNear[i].y);
+    targetCtx.lineTo(runNear[n - 1].x, bottomY);
+    targetCtx.lineTo(runNear[0].x, bottomY);
+    targetCtx.closePath();
+    targetCtx.fill();
+
+    // tread: the ribbon strip between the near and far profiles
+    targetCtx.fillStyle = hiColor;
+    targetCtx.beginPath();
+    targetCtx.moveTo(runNear[0].x, runNear[0].y);
+    for (i = 1; i < n; i++) targetCtx.lineTo(runNear[i].x, runNear[i].y);
+    for (i = n - 1; i >= 0; i--) targetCtx.lineTo(runFar[i].x, runFar[i].y);
+    targetCtx.closePath();
+    targetCtx.fill();
+
+    runNear = []; runFar = [];
+  }
+
+  // one combined silhouette across the whole visible span (near profile
+  // forward, drop at the right, across the bottom, drop at the left),
+  // reused after the loop as a clip mask for a single smooth haze
+  // gradient -- same seam-avoidance reasoning as the run batching above,
+  // but for the horizon-fade wash instead of the solid fill.
+  var silhouette = [];
+  var silhouetteMaxY = -Infinity;
 
   for (var wx = startX; wx < endX; wx += block) {
     var sampleX = wx + block * 0.5;
@@ -1455,37 +1539,27 @@ function drawTerrain(targetCtx) {
     var palette = palettes[Math.min(sectionIndexAtDistance(sampleX), palettes.length - 1)];
     var color = (seg.hillIndex % 2 === 0) ? palette.fill : palette.stripe;
 
-    var topLeft = worldToScreen(wx, blockY);
-    var botRight = worldToScreen(wx + block, blockY + 6000);
+    // near edge of the tread (the actual, physics-accurate ground line)
+    var nearLeft = worldToScreen(wx, blockY);
+    var nearRight = worldToScreen(wx + block, blockY);
 
-    // floor/ceil with 1px overlap so neighboring columns never leave a
-    // hairline seam between them at fractional screen coordinates
-    var rx = Math.floor(topLeft.x);
-    var ry = Math.floor(topLeft.y);
-    var rw = Math.ceil(botRight.x) - rx + 1;
-    var rh = Math.ceil(botRight.y) - ry;
-    targetCtx.fillStyle = color;
-    targetCtx.fillRect(rx, ry, rw, rh);
+    // far edge of the tread: a fixed screen-space depth vector faking a
+    // track that has WIDTH, receding up-and-across into the tilt
+    var farLeft = { x: nearLeft.x + tilt.trackDepthX, y: nearLeft.y + tilt.trackDepthY };
+    var farRight = { x: nearRight.x + tilt.trackDepthX, y: nearRight.y + tilt.trackDepthY };
 
-    // 2.5D fork: a sunlit cap along the top tread of every block, like a
-    // beveled voxel edge -- turns the flat-shaded staircase into chunky
-    // extruded blocks instead of paper-flat color.
-    var hi = TERRAIN_HIGHLIGHT_CACHE[color] || (TERRAIN_HIGHLIGHT_CACHE[color] = shadeHexColor(color, 32));
-    targetCtx.fillStyle = hi;
-    targetCtx.fillRect(rx, ry, rw, Math.min(6, rh));
-
-    // 2.5D fork: atmospheric haze -- blocks further out toward the horizon
-    // glow (screen-space, not tied to world distance) fade toward the sky,
-    // the classic pseudo-3D "vista extends past what you can see" cue.
-    var hazeFrac = clamp((rx - W * 0.45) / (W * 0.55), 0, 1);
-    if (hazeFrac > 0.02) {
-      targetCtx.globalAlpha = hazeFrac * hazeFrac * 0.6;
-      targetCtx.fillStyle = "#dcecf5";
-      targetCtx.fillRect(rx, ry, rw, rh);
-      targetCtx.globalAlpha = 1;
+    if (color !== runColor) {
+      flushRun();
+      runColor = color;
     }
+    runNear.push(nearLeft, nearRight);
+    runFar.push(farLeft, farRight);
+    silhouette.push(nearLeft, nearRight);
+    if (nearLeft.y > silhouetteMaxY) silhouetteMaxY = nearLeft.y;
+    if (nearRight.y > silhouetteMaxY) silhouetteMaxY = nearRight.y;
 
-    // stepped outline: a flat tread across this column, a vertical riser
+    // stepped outline traced along the FAR rail (reads as the ridge line
+    // of the track): a flat tread across this column, a vertical riser
     // wherever the height changed from the column before it -- flush and
     // restart the stroke path whenever the section (and its outline
     // color) changes at a boundary
@@ -1493,18 +1567,43 @@ function drawTerrain(targetCtx) {
       flushOutline();
       currentOutline = palette.outline;
       targetCtx.beginPath();
-      targetCtx.moveTo(topLeft.x, topLeft.y);
-      pathOpen = true;
+      targetCtx.moveTo(farLeft.x, farLeft.y);
+      outlineOpen = true;
     } else if (prevBlockY === null) {
-      targetCtx.moveTo(topLeft.x, topLeft.y);
+      targetCtx.moveTo(farLeft.x, farLeft.y);
     } else if (blockY !== prevBlockY) {
-      targetCtx.lineTo(topLeft.x, topLeft.y);
+      targetCtx.lineTo(farLeft.x, farLeft.y);
     }
-    var topRight = worldToScreen(wx + block, blockY);
-    targetCtx.lineTo(topRight.x, topRight.y);
+    targetCtx.lineTo(farRight.x, farRight.y);
     prevBlockY = blockY;
   }
+  flushRun();
   flushOutline();
+
+  // 2.5D fork: atmospheric haze -- the terrain fades toward the sky
+  // color as it approaches the horizon glow (screen-space, not tied to
+  // world distance), the classic pseudo-3D "vista extends past what you
+  // can see" cue. One gradient, clipped to everything just drawn, instead
+  // of a per-column overlay -- smooth across hill boundaries and immune
+  // to the same seaming problem as the solid fills.
+  if (silhouette.length > 1) {
+    var sN = silhouette.length;
+    var floorY = silhouetteMaxY + 2000;
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.moveTo(silhouette[0].x, silhouette[0].y);
+    for (var si = 1; si < sN; si++) targetCtx.lineTo(silhouette[si].x, silhouette[si].y);
+    targetCtx.lineTo(silhouette[sN - 1].x, floorY);
+    targetCtx.lineTo(silhouette[0].x, floorY);
+    targetCtx.closePath();
+    targetCtx.clip();
+    var hazeGrad = targetCtx.createLinearGradient(W * 0.45, 0, W, 0);
+    hazeGrad.addColorStop(0, "rgba(220,236,245,0)");
+    hazeGrad.addColorStop(1, "rgba(220,236,245,0.55)");
+    targetCtx.fillStyle = hazeGrad;
+    targetCtx.fillRect(0, 0, W, H);
+    targetCtx.restore();
+  }
 }
 
 function drawPlayer() {
