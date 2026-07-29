@@ -114,8 +114,10 @@ var TUNING = {
     easeY: 3.5,               // vertical follow ease rate while grounded (soft/floaty)
     easeYAirborne: 9.0,       // snappier vertical ease in the air so the lookahead below
                               // actually catches up before a (typically brief) flight ends
-    zoomMin: 0.095,           // 2.5D fork v2: pulled back much further still (was 0.16, originally 0.22)
-    zoomMax: 0.5,             // 2.5D fork v2: further out even at low speed (was 0.85, originally 1.0)
+    zoomMin: 0.13,            // 2.5D fork v3: back off from v2's 0.095 -- the real perspective divide
+                              // (tilt.depthRef below) now does the "see further" work, so raw zoom
+                              // doesn't need to go so extreme that hills stop reading as hills
+    zoomMax: 0.62,            // 2.5D fork v3: was 0.5 in v2, 0.85 in v1, originally 1.0
     zoomSpeedRef: 1500,       // px/s speed at which zoom reaches zoomMin
     zoomAltRef: 500,          // px of altitude above terrain at which zoom reaches zoomMin
     zoomAirborneMin: 0.45,    // floor on the zoom-out ratio any time we're in the air at all
@@ -131,12 +133,26 @@ var TUNING = {
     // the slope rather than side-on. trackDepthX/Y additionally fake a track
     // WIDTH the physics doesn't have, by drawing a second "far rail" edge
     // offset by a fixed screen vector from every terrain tread point.
+    // v3 rework: v2's flat affine shear had no actual depth in it -- a pure
+    // shear just skews every hill by the same constant amount regardless of
+    // distance, which reads as "smeared", not "3D" (nothing about it looks
+    // like it's receding). Real depth needs things further from the camera
+    // to shrink toward a vanishing point -- that perspective divide
+    // (tilt.depthRef below) is the actual "magic" ingredient v2 was
+    // missing. Shear/squash are also both dialed way back so hills read as
+    // hills again instead of a jagged sawtooth wall.
     tilt: {
-      shearX: 0.85,           // horizontal shear per unit of (squashed-out) vertical screen offset
-      squashY: 0.62,          // vertical compression -- the "looking down at an angle" foreshortening
-      horizonYFrac: 0.30,     // screen-space fraction where the camera's reference line sits
-      trackDepthX: -34,       // px, far-rail offset (up-and-across) faking track width
-      trackDepthY: -52
+      shearX: 0.22,            // gentle horizontal shear (was 0.85 -- that's what sawtoothed the hills)
+      squashY: 0.74,           // gentle vertical compression (was 0.62)
+      horizonYFrac: 0.40,      // more sky up top (was 0.30, which let the hill mass swallow the frame)
+      depthRef: 4200,          // NEW: world px of distance at which things render at half size --
+                              // a true f/(f+dist) perspective divide (this IS depthRef), which is
+                              // guaranteed monotonic (nothing ever folds back on screen) unlike an
+                              // eased polynomial falloff, which can reverse direction past its clamp
+                              // and pinch the terrain into a self-intersecting notch right at that
+                              // distance -- that's what the very first version of this rework did.
+      trackDepthX: -12,        // px, far-rail offset faking track width -- subtle now, not a slab
+      trackDepthY: -20
     }
   },
 
@@ -1156,19 +1172,27 @@ function triggerCameraShake(magnitude, duration) {
   camera.shakeMagInitial = magnitude;
 }
 
-// 2.5D fork v2: oblique shear+squash "tilted camera" projection. dx/dy are
+// 2.5D fork v3: an actual perspective divide, not just a shear. dx/dy are
 // the ordinary zoomed camera-relative offsets exactly like the original
-// side-on game; tilt.shearX/squashY then fake an elevated, angled-down
-// Excite-Bike-3D-style view by shearing the vertical offset into the
-// horizontal axis and compressing it, instead of drawing it straight down.
-// Every screen position in the game (terrain, player, pickups, house,
-// particles) already goes through this one function, so the whole world
-// tilts together and gameplay logic (which never reads screen coordinates)
-// is completely unaffected.
+// side-on game; `scale` then shrinks anything far from the camera (in
+// either direction along the track) toward a vanishing point -- that's
+// what makes distant hills genuinely recede instead of just getting
+// dragged sideways by a constant skew. tilt.shearX/squashY then apply a
+// much gentler elevated, angled-down camera on top of that real depth,
+// for the Excite-Bike-3D-style look. Every screen position in the game
+// (terrain, player, pickups, house, particles) already goes through this
+// one function, so the whole world tilts/recedes together and gameplay
+// logic (which never reads screen coordinates) is completely unaffected.
 function worldToScreen(wx, wy) {
   var tilt = TUNING.camera.tilt;
   var dx = (wx - camera.x) * camera.zoom;
   var dy = (wy - camera.y) * camera.zoom;
+
+  var dist = Math.abs(wx - camera.x);
+  var scale = tilt.depthRef / (tilt.depthRef + dist);
+
+  dx *= scale;
+  dy *= scale;
   var sy = dy * tilt.squashY;
   return {
     x: dx + sy * tilt.shearX + W * TUNING.camera.leadFraction + camera.shakeOffsetX,
@@ -1708,6 +1732,16 @@ function drawAirResolve() {
 }
 
 function drawHouse() {
+  // 2.5D fork v3: the perspective divide in worldToScreen asymptotes toward
+  // a fixed vanishing-point offset for very distant points instead of
+  // sending them arbitrarily far off-screen -- correct for making the
+  // horizon converge, but it means a single fixed-position, fixed-size
+  // sprite like the house would otherwise falsely "pop in" near the
+  // horizon from a hundred thousand world px away, long before the finish
+  // stretch. Cull it using the pre-perspective distance, matching the
+  // same "only visible once actually close" behavior the original always had.
+  var rawDx = (JOURNEY_TOTAL_DISTANCE - camera.x) * camera.zoom;
+  if (Math.abs(rawDx) > W * 3) return;
   var groundY = terrain.y(JOURNEY_TOTAL_DISTANCE);
   var s = worldToScreen(JOURNEY_TOTAL_DISTANCE, groundY);
   ASSETS.house.draw(ctx, s.x, s.y, performance.now() / 1000);
