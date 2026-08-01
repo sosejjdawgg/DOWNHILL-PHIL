@@ -219,12 +219,29 @@ var TUNING = {
     boostAmount: 480,
     weights: { coin: 66, boost: 18, battery: 8 }, // battery halved (50% rarer) -- refills matter more when scarce
 
-    // Apple: a rare, separate "reach for it" pickup that lives high above a
+    // Apple: a rare, separate "reach for it" pickup that lives above a
     // peak -- rolled independently of the normal spawn gate above, since it
     // occupies its own airspace and shouldn't compete with (or get crowded
     // out by) the regular coin/boost/battery spawn on the same hill.
-    appleChance: 0.16,   // per qualifying peak
-    appleHeight: 520,    // world px above the peak -- needs real airtime to reach
+    //
+    // Playtested with Playwright by measuring real jump arcs off a wide
+    // range of generated peaks (varying preceding-climb strength, since
+    // that -- not raw skill -- is most of what determines how high a given
+    // launch can go): a target this high up needs a strong climb behind it
+    // and is only reachable off maybe half of qualifying peaks; anything
+    // higher missed by 200-600px on the weaker ones far more often than it
+    // connected. This height/distance is low enough that it's reachable
+    // off essentially any qualifying peak with a decent (not perfect)
+    // climb, and a wide magnet radius forgives the rest of the aim.
+    appleChance: 0.16,        // per qualifying peak
+    appleApexHeight: 120,     // world px above the peak, at the apex
+    appleApexDx: 160,         // world px past the peak, at the apex
+    appleMagnetRadius: 220,   // wide -- this is a precision mid-air grab, be forgiving
+    appleMagnetPull: 16.0,    // much stronger than the standard pull -- proportional-to-gap
+                              // servoing at the normal 6.0 rate isn't enough to close on a
+                              // fast-moving player passing at an angle; measured cases sitting
+                              // in range for 100+ frames without ever converging otherwise
+    appleCollectRadius: 46,
     appleScore: 25
   },
 
@@ -1134,13 +1151,19 @@ var pickups = {
   trySpawnForHill: function (prevKp, newKp) {
     var wasPeak = newKp.y > prevKp.y; // descending after prev => prev was a local high point
 
-    // Apple is a separate, rare "reach for it" pickup living high above a
-    // peak -- rolled independently of the normal spawn gate below so it
-    // doesn't compete with (or get crowded out by) the regular coin/boost/
-    // battery spawn on the same hill.
+    // Apple is a separate, rare "reach for it" pickup living at roughly
+    // where a good clean jump off this peak actually apexes -- rolled
+    // independently of the normal spawn gate below so it doesn't compete
+    // with (or get crowded out by) the regular coin/boost/battery spawn
+    // on the same hill. Clamped to the segment width so a shorter hill
+    // (dip segments here are already widened elsewhere, but stay safe)
+    // still places it somewhere reachable rather than past the far end.
     if (wasPeak && Math.random() < TUNING.pickups.appleChance) {
-      var ax = prevKp.x + (newKp.x - prevKp.x) * randRange(0.08, 0.22);
-      var ay = prevKp.y - TUNING.pickups.appleHeight;
+      var span = newKp.x - prevKp.x;
+      var apexDx = Math.min(TUNING.pickups.appleApexDx, span * 0.7);
+      var apexHeight = TUNING.pickups.appleApexHeight * (apexDx / TUNING.pickups.appleApexDx);
+      var ax = prevKp.x + apexDx;
+      var ay = prevKp.y - apexHeight;
       this.list.push({ type: "apple", x: ax, y: ay, collected: false, t: Math.random() * 10, small: false });
     }
 
@@ -1195,12 +1218,17 @@ var pickups = {
       if (p.group && p.groupIndex !== p.group.revealIndex) continue; // still hidden -- not this one's turn yet
       var dx = player.x - p.x, dy = player.y - p.y;
       var dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < t.magnetRadius) {
-        var pull = clamp(t.magnetPull * dt, 0, 1);
+      // apple is a precision mid-air grab -- much more forgiving radius
+      // than a pickup you're rolling/gliding straight over
+      var magnetR = p.type === "apple" ? t.appleMagnetRadius : t.magnetRadius;
+      var collectR = p.type === "apple" ? t.appleCollectRadius : t.collectRadius;
+      var magnetPull = p.type === "apple" ? t.appleMagnetPull : t.magnetPull;
+      if (dist < magnetR) {
+        var pull = clamp(magnetPull * dt, 0, 1);
         p.x += dx * pull;
         p.y += dy * pull;
       }
-      if (dist < t.collectRadius) this.collect(p);
+      if (dist < collectR) this.collect(p);
     }
     // cull collected / far-behind pickups
     var cutoff = camera.x - W;
