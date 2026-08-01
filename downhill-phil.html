@@ -81,12 +81,24 @@ var TUNING = {
   // velocity vector (nose up) at this rate, speed-preserving, so a bad
   // launch angle can be corrected into a better landing. Floored so
   // holding it can't rotate all the way into flying backward.
-  airTilt: { rate: 2.4, minAngle: -0.9 },
+  // maxContinuous/cooldown exist because gravity keeps adding fresh energy
+  // to vy every frame regardless -- rotating that back upward on an
+  // uncapped loop let a held tilt inject speed indefinitely and effectively
+  // fly forever instead of just correcting one landing. A budget per hold
+  // plus a forced pause once it's spent closes that off; both reset on
+  // landing, so it's a per-flight limit, not a permanent one.
+  airTilt: { rate: 2.4, minAngle: -0.9, maxContinuous: 0.6, cooldown: 1.3 },
 
   // Hidden left-side touch zone while grounded: purely cosmetic, no
   // speed/physics change -- just a wheelie pose so the split still reads
   // as "doing something" without altering the ride.
   wheelie: { tiltAngle: 0.35 },
+
+  // Apple pickup: a big vertical launch plus a forced backflip. The flip
+  // is purely a visual overlay on top of the normal velocity-driven angle
+  // (see drawPlayer) -- it never touches the real landing-angle physics,
+  // so a badly-timed flip can't itself cause a bail.
+  apple: { boostVy: 1550, minForwardBoost: 500, backflipDuration: 0.85 },
 
   camera: {
     leadFraction: 0.30,       // player sits 30% of the way across the screen
@@ -109,8 +121,7 @@ var TUNING = {
     minWidth: 420,            // narrowest hill half-span-ish segment width (roomy relative to Phil's sprite)
     maxWidth: 460,            // widest segment width at max difficulty
     minAmp: 215,              // smallest hill amplitude (roomy relative to Phil's sprite)
-    maxAmp: 240,              // largest hill amplitude at max difficulty
-    pixelBlockSize: 8         // world px per stair-step block (crisp pixel-art terrain)
+    maxAmp: 240               // largest hill amplitude at max difficulty
   },
 
   difficulty: {
@@ -206,7 +217,15 @@ var TUNING = {
     coinScore: 10,
     boostScore: 5,
     boostAmount: 480,
-    weights: { coin: 66, boost: 18, battery: 8 } // battery halved (50% rarer) -- refills matter more when scarce
+    weights: { coin: 66, boost: 18, battery: 8 }, // battery halved (50% rarer) -- refills matter more when scarce
+
+    // Apple: a rare, separate "reach for it" pickup that lives high above a
+    // peak -- rolled independently of the normal spawn gate above, since it
+    // occupies its own airspace and shouldn't compete with (or get crowded
+    // out by) the regular coin/boost/battery spawn on the same hill.
+    appleChance: 0.16,   // per qualifying peak
+    appleHeight: 520,    // world px above the peak -- needs real airtime to reach
+    appleScore: 25
   },
 
   // motion streaks trailing the player -- purely cosmetic, scales the
@@ -561,6 +580,79 @@ var ASSETS = {
         ctx.fill();
         ctx.restore();
       }
+    },
+    apple: {
+      color: "#e6432f", colorDark: "#a91f14", highlight: "#ff9a86",
+      stem: "#7a4b25", leaf: "#63c250", glow: "#ffcf7a",
+      draw: function (ctx, x, y, t, scale) {
+        scale = scale || 1;
+        var a = ASSETS.pickups.apple;
+        var bob = Math.sin(t * 2.4) * 6 * scale;
+        var cx = x, cy = y + bob;
+        var pulse = 0.6 + 0.4 * Math.sin(t * 2.1);
+        var rock = Math.sin(t * 1.6) * 0.14;
+
+        // soft expanding aura ring -- a step up from the other pickups'
+        // glow, so this one reads as special/rare before you're even
+        // close enough to see what it is
+        ctx.save();
+        ctx.globalAlpha = 0.22 + 0.16 * pulse;
+        ctx.strokeStyle = a.glow;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 22 * scale + 7 * pulse, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+
+        drawPickupSparkle(ctx, cx, cy, t, 28 * scale, a.glow);
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(rock);
+        ctx.scale(scale, scale);
+        ctx.shadowColor = a.glow;
+        ctx.shadowBlur = 14 + 8 * pulse;
+
+        var r = 13;
+        // body -- two overlapping lobes read as a proper apple silhouette
+        // instead of a plain circle
+        ctx.fillStyle = a.color;
+        ctx.beginPath();
+        ctx.ellipse(-r * 0.42, r * 0.08, r * 0.72, r * 0.92, 0, 0, Math.PI * 2);
+        ctx.ellipse(r * 0.42, r * 0.08, r * 0.72, r * 0.92, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // soft shading, lower-right, as if lit from the upper-left
+        ctx.globalAlpha = 0.32;
+        ctx.fillStyle = a.colorDark;
+        ctx.beginPath();
+        ctx.ellipse(r * 0.32, r * 0.32, r * 0.62, r * 0.78, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // glossy highlight
+        ctx.fillStyle = a.highlight;
+        ctx.beginPath();
+        ctx.ellipse(-r * 0.5, -r * 0.38, r * 0.26, r * 0.4, -0.4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // stem, curling slightly
+        ctx.strokeStyle = a.stem;
+        ctx.lineWidth = 2.2;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(0, -r * 0.8);
+        ctx.quadraticCurveTo(r * 0.2, -r * 1.2, r * 0.05, -r * 1.5);
+        ctx.stroke();
+
+        // leaf
+        ctx.fillStyle = a.leaf;
+        ctx.beginPath();
+        ctx.ellipse(r * 0.38, -r * 1.18, r * 0.44, r * 0.22, -0.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
     }
   },
 
@@ -758,6 +850,10 @@ var player = {
   diveHeld: false,
   tiltHeld: false,     // hidden left-side touch zone, held while airborne
   wheelieActive: false, // hidden left-side touch zone, cosmetic while grounded
+  tiltActiveTime: 0,   // s, continuous air-tilt use this flight -- resets on landing/release
+  tiltCooldown: 0,     // s remaining before air-tilt works again, once maxContinuous is spent
+  backflipTimer: 0,    // s remaining in a forced backflip (apple pickup), purely visual
+  backflipDuration: 0, // duration of the current flip, for computing rotation progress
   combo: 0,
   distance: 0,
   bailTimer: 0,   // >0 while tumbling from a bad crash, ignores dive input
@@ -777,6 +873,10 @@ var player = {
     this.diveHeld = false;
     this.tiltHeld = false;
     this.wheelieActive = false;
+    this.tiltActiveTime = 0;
+    this.tiltCooldown = 0;
+    this.backflipTimer = 0;
+    this.backflipDuration = 0;
     this.combo = 0;
     this.distance = 0;
     this.angle = 0;
@@ -800,6 +900,10 @@ var player = {
 
     if (this.airCounterPulse > 0) {
       this.airCounterPulse = Math.max(0, this.airCounterPulse - dt / TUNING.airtime.pulseDuration);
+    }
+
+    if (this.backflipTimer > 0) {
+      this.backflipTimer = Math.max(0, this.backflipTimer - dt);
     }
 
     if (this.bailTimer > 0 && wasGrounded) {
@@ -836,13 +940,26 @@ var player = {
 
     // Hidden left-side touch zone while airborne: tip backward, rotating
     // the velocity vector nose-up (speed preserved) so a bad launch angle
-    // can be steered into a cleaner landing.
-    if (this.tiltHeld && !wasGrounded && this.bailTimer <= 0) {
+    // can be steered into a cleaner landing. Budgeted + cooled down (see
+    // TUNING.airTilt) so it can't be held indefinitely to keep injecting
+    // gravity's fresh energy back upward and staying aloft forever.
+    if (this.tiltCooldown > 0) {
+      this.tiltCooldown = Math.max(0, this.tiltCooldown - dt);
+    }
+    if (this.tiltHeld && !wasGrounded && this.bailTimer <= 0 && this.tiltCooldown <= 0) {
       var curAngle = Math.atan2(this.vy, this.vx);
       var newAngle = Math.max(TUNING.airTilt.minAngle, curAngle - TUNING.airTilt.rate * dt);
       var tiltSpeed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
       this.vx = tiltSpeed * Math.cos(newAngle);
       this.vy = tiltSpeed * Math.sin(newAngle);
+
+      this.tiltActiveTime += dt;
+      if (this.tiltActiveTime >= TUNING.airTilt.maxContinuous) {
+        this.tiltCooldown = TUNING.airTilt.cooldown;
+        this.tiltActiveTime = 0;
+      }
+    } else if (!this.tiltHeld) {
+      this.tiltActiveTime = 0;
     }
 
     this.vx = clamp(this.vx, TUNING.minForwardVel, TUNING.maxSpeed);
@@ -894,9 +1011,17 @@ var player = {
     this.state = "GROUNDED";
   },
 
+  startBackflip: function () {
+    this.backflipDuration = TUNING.apple.backflipDuration;
+    this.backflipTimer = TUNING.apple.backflipDuration;
+  },
+
   land: function (groundY) {
     this.airTime = 0;
     this.airTicks = 0;
+    this.tiltActiveTime = 0;
+    this.tiltCooldown = 0;
+    this.backflipTimer = 0;
     this.y = groundY;
     var slope = terrain.slope(this.x);
     var invNorm = 1 / Math.sqrt(1 + slope * slope);
@@ -1007,9 +1132,20 @@ var pickups = {
   },
 
   trySpawnForHill: function (prevKp, newKp) {
+    var wasPeak = newKp.y > prevKp.y; // descending after prev => prev was a local high point
+
+    // Apple is a separate, rare "reach for it" pickup living high above a
+    // peak -- rolled independently of the normal spawn gate below so it
+    // doesn't compete with (or get crowded out by) the regular coin/boost/
+    // battery spawn on the same hill.
+    if (wasPeak && Math.random() < TUNING.pickups.appleChance) {
+      var ax = prevKp.x + (newKp.x - prevKp.x) * randRange(0.08, 0.22);
+      var ay = prevKp.y - TUNING.pickups.appleHeight;
+      this.list.push({ type: "apple", x: ax, y: ay, collected: false, t: Math.random() * 10, small: false });
+    }
+
     if (Math.random() > TUNING.pickups.spawnChancePerHill) return;
     var type = this.pickWeightedType();
-    var wasPeak = newKp.y > prevKp.y; // descending after prev => prev was a local high point
 
     if (type === "battery") {
       // A row of batteries hugging the hill's own contour -- only the
@@ -1094,6 +1230,14 @@ var pickups = {
       } else {
         playBuzzSound(p.groupIndex);
       }
+    } else if (p.type === "apple") {
+      player.vy = -TUNING.apple.boostVy;
+      player.vx = Math.max(player.vx, TUNING.apple.minForwardBoost);
+      player.state = "AIRBORNE";
+      player.startBackflip();
+      game.addScore(t.appleScore);
+      game.spawnPopup("BACKFLIP!", p.x, p.y - 24, ASSETS.pickups.apple.color);
+      playAppleBoostSound();
     }
   },
 
@@ -1309,76 +1453,74 @@ function drawBackgroundHills() {
   }
 }
 
-// Renders the terrain as a staircase of flat-shaded rectangular columns
-// instead of a smooth curve -- genuine blocky pixel-art geometry, drawn
-// sharp at full resolution (no downsampling/blur, unlike an upscaled
-// low-res buffer). The column grid is anchored to WORLD space (not screen
-// space), so a given stretch of hill always quantizes to the same blocks
-// regardless of scroll position -- that's what keeps the steps stable
-// while scrolling instead of shimmering/crawling.
+// Renders the terrain as a smooth, continuous filled curve -- terrain.y()
+// is already a smooth cosine-interpolated function, so sampling it densely
+// and connecting the samples directly (instead of quantizing each sample
+// to a rounded block height) gives rolling hills back instead of a
+// pixel-art staircase. Runs of the same hill (alternating fill/stripe by
+// hillIndex, same as before) are batched into one filled polygon each --
+// many small abutting shapes would otherwise leave faint antialiased
+// seams between them.
 function drawTerrain(targetCtx) {
   var kp = terrain.keyPoints;
   var palettes = ASSETS.terrain.sectionPalettes;
   var worldLeft = camera.x - 200 / camera.zoom;
   var worldRight = camera.x + (W + 200) / camera.zoom;
-  var block = TUNING.terrain.pixelBlockSize;
+  var step = Math.max(4, 6 / camera.zoom); // world px per sample -- finer zoomed in, coarser out
 
-  var startX = Math.floor(worldLeft / block) * block;
-  var endX = Math.ceil(worldRight / block) * block;
+  var startX = Math.floor(worldLeft / step) * step;
+  var endX = Math.ceil(worldRight / step) * step;
 
-  var prevBlockY = null;
-  var currentOutline = null;
-  var pathOpen = false;
-  function flushOutline() {
-    if (pathOpen) {
-      targetCtx.strokeStyle = currentOutline;
-      targetCtx.lineWidth = 2;
-      targetCtx.stroke();
-      pathOpen = false;
-    }
+  var runPoints = [];
+  var runColor = null;
+  var runOutline = null;
+  function flushRun() {
+    var n = runPoints.length;
+    if (n < 2) { runPoints = []; return; }
+    var bottomY = Math.max(runPoints[0].y, runPoints[n - 1].y) + 4000;
+    var i;
+
+    targetCtx.fillStyle = runColor;
+    targetCtx.beginPath();
+    targetCtx.moveTo(runPoints[0].x, runPoints[0].y);
+    for (i = 1; i < n; i++) targetCtx.lineTo(runPoints[i].x, runPoints[i].y);
+    targetCtx.lineTo(runPoints[n - 1].x, bottomY);
+    targetCtx.lineTo(runPoints[0].x, bottomY);
+    targetCtx.closePath();
+    targetCtx.fill();
+
+    targetCtx.strokeStyle = runOutline;
+    targetCtx.lineWidth = 2;
+    targetCtx.beginPath();
+    targetCtx.moveTo(runPoints[0].x, runPoints[0].y);
+    for (i = 1; i < n; i++) targetCtx.lineTo(runPoints[i].x, runPoints[i].y);
+    targetCtx.stroke();
+
+    runPoints = [];
   }
 
-  for (var wx = startX; wx < endX; wx += block) {
-    var sampleX = wx + block * 0.5;
-    var worldY = terrain.y(sampleX);
-    var blockY = Math.round(worldY / block) * block;
-
-    var seg = kp[terrain.segmentIndexAt(sampleX)];
-    var palette = palettes[Math.min(sectionIndexAtDistance(sampleX), palettes.length - 1)];
+  for (var wx = startX; wx <= endX; wx += step) {
+    var worldY = terrain.y(wx);
+    var seg = kp[terrain.segmentIndexAt(wx)];
+    var palette = palettes[Math.min(sectionIndexAtDistance(wx), palettes.length - 1)];
     var color = (seg.hillIndex % 2 === 0) ? palette.fill : palette.stripe;
+    var pt = worldToScreen(wx, worldY);
 
-    var topLeft = worldToScreen(wx, blockY);
-    var botRight = worldToScreen(wx + block, blockY + 6000);
-
-    // floor/ceil with 1px overlap so neighboring columns never leave a
-    // hairline seam between them at fractional screen coordinates
-    var rx = Math.floor(topLeft.x);
-    var ry = Math.floor(topLeft.y);
-    var rw = Math.ceil(botRight.x) - rx + 1;
-    var rh = Math.ceil(botRight.y) - ry;
-    targetCtx.fillStyle = color;
-    targetCtx.fillRect(rx, ry, rw, rh);
-
-    // stepped outline: a flat tread across this column, a vertical riser
-    // wherever the height changed from the column before it -- flush and
-    // restart the stroke path whenever the section (and its outline
-    // color) changes at a boundary
-    if (palette.outline !== currentOutline) {
-      flushOutline();
-      currentOutline = palette.outline;
-      targetCtx.beginPath();
-      targetCtx.moveTo(topLeft.x, topLeft.y);
-      pathOpen = true;
-    } else if (prevBlockY === null) {
-      targetCtx.moveTo(topLeft.x, topLeft.y);
-    } else if (blockY !== prevBlockY) {
-      targetCtx.lineTo(topLeft.x, topLeft.y);
+    if (color !== runColor && runColor !== null) {
+      // share this exact boundary point with the run that's ending, so its
+      // fill reaches all the way to here instead of stopping one sample
+      // short -- otherwise the gap between the two runs' polygons leaves a
+      // hairline seam showing whatever's behind the terrain
+      runPoints.push(pt);
+      flushRun();
+      runOutline = palette.outline;
+    } else if (runColor === null) {
+      runOutline = palette.outline;
     }
-    var topRight = worldToScreen(wx + block, blockY);
-    targetCtx.lineTo(topRight.x, topRight.y);
-    prevBlockY = blockY;
+    runColor = color;
+    runPoints.push(pt);
   }
-  flushOutline();
+  flushRun();
 }
 
 function drawPlayer() {
@@ -1394,6 +1536,13 @@ function drawPlayer() {
     angle = player.angle;
     if (state === "GROUNDED" && player.wheelieActive) {
       angle -= TUNING.wheelie.tiltAngle; // nose-up pop, purely cosmetic
+    }
+    if (player.backflipTimer > 0) {
+      // one full backward rotation layered on top of the normal angle --
+      // purely a visual overlay, the real velocity-driven angle underneath
+      // keeps landing detection unaffected by how the flip looks
+      var flipProgress = 1 - player.backflipTimer / player.backflipDuration;
+      angle -= flipProgress * Math.PI * 2;
     }
   }
   ASSETS.player.draw(ctx, s.x, s.y, angle, state, player.speed);
@@ -1823,6 +1972,45 @@ function playChargeCompleteSound() {
   gain.connect(ctx2.destination);
   osc.start(now);
   osc.stop(now + 0.34);
+}
+
+// Apple pickup: a rising sawtooth "whoosh" for the launch, immediately
+// followed by a bright ascending three-note chime -- reads as a bigger,
+// more magical event than the other pickups' single-tone cues.
+function playAppleBoostSound() {
+  if (soundMuted) return;
+  var ctx2 = ensureAudioCtx();
+  if (!ctx2) return;
+  var now = ctx2.currentTime;
+
+  var whoosh = ctx2.createOscillator();
+  var whooshGain = ctx2.createGain();
+  whoosh.type = "sawtooth";
+  whoosh.frequency.setValueAtTime(180, now);
+  whoosh.frequency.exponentialRampToValueAtTime(720, now + 0.22);
+  whooshGain.gain.setValueAtTime(0.0001, now);
+  whooshGain.gain.exponentialRampToValueAtTime(0.14, now + 0.05);
+  whooshGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+  whoosh.connect(whooshGain);
+  whooshGain.connect(ctx2.destination);
+  whoosh.start(now);
+  whoosh.stop(now + 0.26);
+
+  var notes = [784, 987.8, 1318.5]; // G5, B5, E6
+  for (var i = 0; i < notes.length; i++) {
+    var t0 = now + 0.16 + i * 0.075;
+    var osc = ctx2.createOscillator();
+    var gain = ctx2.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(notes[i], t0);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.24, t0 + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.26);
+    osc.connect(gain);
+    gain.connect(ctx2.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.28);
+  }
 }
 
 // Bottom-left corner -- always clear of the score/battery HUD panels in
