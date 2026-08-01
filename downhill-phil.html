@@ -55,6 +55,10 @@ var TUNING = {
   gravity: 1800,              // px/s^2, normal fall acceleration
   diveGravityMult: 4,         // multiplier applied to gravity while diving
   diveForwardAccel: 260,      // px/s^2, small forward push while diving
+  diveMaxAngle: 0.96,         // rad (~55 deg), hard cap on how nose-down an airborne dive can
+                              // pitch -- diveGravityMult alone saturates vy almost immediately
+                              // while vx creeps up slowly, so uncapped this read as a near-vertical
+                              // nosedive instead of a fast dive
 
   // Reference implementations (haqu/tiny-wings, ncase/Pony-Wings) apply the
   // dive force continuously whether the player is grounded or airborne --
@@ -667,18 +671,20 @@ var terrain = {
       var dir = -this.lastDir;
       this.lastDir = dir;
 
-      // Dips (troughs, dir > 0) run deeper and more varied than peaks --
-      // more room on the descent before the next climb starts, instead of
-      // landing and slamming straight into a new ramp. Peaks keep their
-      // original, gentler range.
+      // Dips (troughs, dir > 0) run deeper, fatter, and more varied than
+      // peaks -- more room on the descent before the next climb starts,
+      // instead of landing and slamming straight into a new ramp. Peaks
+      // keep their original, gentler range.
       var amp = dir > 0
-        ? lerp(t.minAmp, t.maxAmp, diff) * randRange(0.5, 2.0)
+        ? lerp(t.minAmp, t.maxAmp, diff) * randRange(0.7, 2.4)
         : lerp(t.minAmp, t.maxAmp, diff) * randRange(0.55, 1.0);
 
-      // Spread that extra depth over ~25% more distance on the way down --
-      // same drop, less steep (~20% gentler slope) instead of a sharper cliff.
+      // Spread that extra depth over a much wider run on the way down --
+      // fatter dips (more time actually in them, not just gliding past)
+      // and a gentler slope for the same or greater depth, instead of a
+      // sharper cliff.
       if (dir > 0) {
-        width *= 1.25;
+        width *= 1.9;
       }
 
       var newX = last.x + width;
@@ -692,7 +698,7 @@ var terrain = {
         newY = clamp(
           t.baseline + dir * amp,
           t.baseline - t.maxAmp * 2.2,
-          t.baseline + t.maxAmp * 2.2
+          t.baseline + t.maxAmp * 2.6
         );
       }
 
@@ -812,6 +818,17 @@ var player = {
       } else {
         this.vy += TUNING.gravity * TUNING.diveGravityMult * dt;
         this.vx += TUNING.diveForwardAccel * dt;
+
+        // diveGravityMult saturates vy almost instantly while vx creeps up
+        // over the same short window, so left alone the dive pitches to a
+        // near-vertical nosedive -- clamp the angle (speed-preserving) so
+        // holding dive never pitches steeper than diveMaxAngle
+        var diveAngle = Math.atan2(this.vy, this.vx);
+        if (diveAngle > TUNING.diveMaxAngle) {
+          var diveSpeed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+          this.vx = diveSpeed * Math.cos(TUNING.diveMaxAngle);
+          this.vy = diveSpeed * Math.sin(TUNING.diveMaxAngle);
+        }
       }
     } else {
       this.vy += TUNING.gravity * dt; // baseline gravity, grounded or not
