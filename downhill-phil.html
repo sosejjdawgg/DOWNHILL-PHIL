@@ -1192,14 +1192,21 @@ var pickups = {
     if (wasPeak) {
       // coin/boost ride a little rainbow of 3 smaller pickups off the jump
       // -- collected mid-air on the way down, ready for the player coming
-      // off the ramp, instead of one item sitting flat on the ground
+      // off the ramp, instead of one item sitting flat on the ground.
+      // Height is measured from the LOCAL ground at each item's own x, not
+      // the peak's height -- dips are now much deeper/wider than when this
+      // was first written (see terrain.ensureGenerated), so a peak-relative
+      // offset put the later items in the arc 300-400+ world px above the
+      // actual ground beneath them as the descent dropped away under a
+      // fixed height, floating far out of reach instead of riding along
+      // just above the slope.
       var count = 3;
       for (var i = 0; i < count; i++) {
         var tRel = i / (count - 1); // 0, 0.5, 1
         var tSeg = lerp(0.2, 0.62, tRel);
         var x = lerp(prevKp.x, newKp.x, tSeg);
         var rainbow = 0.55 + 0.45 * Math.sin(Math.PI * tRel); // 0.55 at the ends, 1.0 in the middle
-        var y = prevKp.y - TUNING.pickups.arcHeight * rainbow;
+        var y = terrain.y(x) - TUNING.pickups.arcHeight * rainbow;
         this.list.push({ type: type, x: x, y: y, collected: false, t: Math.random() * 10, small: true });
       }
     } else {
@@ -1265,6 +1272,7 @@ var pickups = {
       player.startBackflip();
       game.addScore(t.appleScore);
       game.spawnPopup("BACKFLIP!", p.x, p.y - 24, ASSETS.pickups.apple.color);
+      playAppleCrunchSound();
       playAppleBoostSound();
     }
   },
@@ -2000,6 +2008,49 @@ function playChargeCompleteSound() {
   gain.connect(ctx2.destination);
   osc.start(now);
   osc.stop(now + 0.34);
+}
+
+// Apple pickup: two quick bursts of filtered, decaying noise -- a crunchy
+// "bite" texture that a pure-oscillator tone can't produce. Plays right
+// at the moment of collection, just ahead of the launch whoosh/chime
+// below, so it reads as "bite the apple, THEN get launched" rather than
+// one blended cue.
+function playAppleCrunchSound() {
+  if (soundMuted) return;
+  var ctx2 = ensureAudioCtx();
+  if (!ctx2) return;
+  var now = ctx2.currentTime;
+
+  var bites = [0, 0.1];
+  for (var b = 0; b < bites.length; b++) {
+    var t0 = now + bites[b];
+    var duration = 0.09;
+    var bufferSize = Math.max(1, Math.floor(ctx2.sampleRate * duration));
+    var buffer = ctx2.createBuffer(1, bufferSize, ctx2.sampleRate);
+    var data = buffer.getChannelData(0);
+    for (var i = 0; i < bufferSize; i++) {
+      // decaying white noise -- the raw "crunch" texture
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 2);
+    }
+    var noise = ctx2.createBufferSource();
+    noise.buffer = buffer;
+
+    var filter = ctx2.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.frequency.value = 1100 + b * 400; // second bite pitched a bit higher/crisper
+    filter.Q.value = 0.8;
+
+    var gain = ctx2.createGain();
+    gain.gain.setValueAtTime(0.001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.5, t0 + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx2.destination);
+    noise.start(t0);
+    noise.stop(t0 + duration + 0.01);
+  }
 }
 
 // Apple pickup: a rising sawtooth "whoosh" for the launch, immediately
