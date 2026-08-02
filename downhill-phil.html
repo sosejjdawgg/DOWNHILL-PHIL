@@ -98,7 +98,19 @@ var TUNING = {
   // is purely a visual overlay on top of the normal velocity-driven angle
   // (see drawPlayer) -- it never touches the real landing-angle physics,
   // so a badly-timed flip can't itself cause a bail.
-  apple: { boostVy: 1550, minForwardBoost: 500, backflipDuration: 0.85 },
+  // Pitches the CURRENT velocity vector up by a bounded amount and gives
+  // it a speed multiplier, rather than overriding vy to a big absolute
+  // value (the original version set vy=-1550 outright with only a weak
+  // floor on vx -- a near-vertical launch with ~1.5-2s of hang time, far
+  // longer than any normal jump, during which Phil drifted hundreds of
+  // extra world px forward and often landed on unrelated -- sometimes
+  // uphill-facing -- terrain a fixed steep descent angle couldn't match.
+  // Measured a 100% bail rate from that). Rotating from whatever angle
+  // Phil is ALREADY moving at (rather than snapping to one fixed angle)
+  // keeps the launch correlated with the terrain he just took off from,
+  // the same way a normal jump's angle is -- it's a bigger version of his
+  // current jump, not an unrelated one.
+  apple: { pitchUp: 0.65, speedMult: 1.35, backflipDuration: 0.6 },
 
   camera: {
     leadFraction: 0.30,       // player sits 30% of the way across the screen
@@ -1266,8 +1278,12 @@ var pickups = {
         playBuzzSound(p.groupIndex);
       }
     } else if (p.type === "apple") {
-      player.vy = -TUNING.apple.boostVy;
-      player.vx = Math.max(player.vx, TUNING.apple.minForwardBoost);
+      var curSpeed = Math.sqrt(player.vx * player.vx + player.vy * player.vy) || TUNING.minSpeed;
+      var curAngle = Math.atan2(player.vy, player.vx);
+      var launchAngle = curAngle - TUNING.apple.pitchUp;
+      var launchSpeed = Math.min(curSpeed * TUNING.apple.speedMult, TUNING.maxSpeed);
+      player.vx = launchSpeed * Math.cos(launchAngle);
+      player.vy = launchSpeed * Math.sin(launchAngle);
       player.state = "AIRBORNE";
       player.startBackflip();
       game.addScore(t.appleScore);
